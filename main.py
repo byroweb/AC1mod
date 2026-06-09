@@ -1653,6 +1653,169 @@ class DetailPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Mission scene viewer — populated 3D scene + click-to-inspect
+# ---------------------------------------------------------------------------
+class _RasterCanvas(QWidget):
+    """z-buffered scene canvas: drag = orbit, wheel = zoom, click = pick object."""
+    picked = pyqtSignal(int, object)        # object id, click QPoint (-1 = empty)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._arrays = None
+        self._idbuf = None
+        self._idscale = 1.0
+        self.yaw, self.pitch, self.zoom = 0.6, 0.5, 0.8
+        self._drag = None
+        self._moved = False
+        self._lowres = False
+        self.setMinimumSize(520, 420)
+        self.setStyleSheet("background:#181a20;")
+
+    def set_arrays(self, arrays):
+        self._arrays = arrays
+        self.yaw, self.pitch, self.zoom = 0.6, 0.5, 0.8
+        self.update()
+
+    def paintEvent(self, _e):
+        from core import raster
+        p = QPainter(self)
+        if not self._arrays or len(self._arrays[0]) == 0:
+            p.setPen(QColor(150, 160, 175))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "no scene")
+            return
+        w, h = max(self.width(), 8), max(self.height(), 8)
+        sc = 0.5 if self._lowres else 1.0
+        rw, rh = max(int(w * sc), 8), max(int(h * sc), 8)
+        V, VN, F, Fcol, Fid = self._arrays
+        img, idb = raster.render(V, VN, F, Fcol, Fid, rw, rh, self.yaw, self.pitch, self.zoom)
+        self._idbuf, self._idscale = idb, rw / w
+        p.drawImage(self.rect(), img)
+
+    def mousePressEvent(self, e):
+        self._drag = e.position(); self._moved = False
+
+    def mouseMoveEvent(self, e):
+        if self._drag is not None:
+            d = e.position() - self._drag
+            if abs(d.x()) + abs(d.y()) > 2:
+                self._moved = True; self._lowres = True
+            self.yaw += d.x() * 0.01; self.pitch += d.y() * 0.01
+            self._drag = e.position(); self.update()
+
+    def mouseReleaseEvent(self, e):
+        self._lowres = False
+        if not self._moved:
+            self._pick(e.position())
+        self.update()
+        self._drag = None
+
+    def wheelEvent(self, e):
+        self.zoom *= 1.0 + (e.angleDelta().y() / 1200.0)
+        self.zoom = max(0.1, min(20.0, self.zoom)); self.update()
+
+    def _pick(self, pos):
+        if self._idbuf is None:
+            return
+        x = int(pos.x() * self._idscale); y = int(pos.y() * self._idscale)
+        if 0 <= y < self._idbuf.shape[0] and 0 <= x < self._idbuf.shape[1]:
+            oid = int(self._idbuf[y, x])
+            self.picked.emit(oid, pos.toPoint())
+        else:
+            self.picked.emit(-1, pos.toPoint())
+
+
+class _InfoCard(QFrame):
+    """Floating info-only card shown when an object is clicked."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            "QFrame{background:#0f1620; border:1px solid #3D6585; border-radius:6px;}"
+            "QLabel{color:#cfe2f0; font-size:12px;}")
+        self._lbl = QLabel(self)
+        self._lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._lbl.setContentsMargins(10, 8, 10, 8)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.addWidget(self._lbl)
+        self.hide()
+
+    def show_info(self, html, pos):
+        self._lbl.setText(html)
+        self.adjustSize()
+        pw = self.parent().width(); ph = self.parent().height()
+        x = min(pos.x() + 12, pw - self.width() - 6)
+        y = min(pos.y() + 12, ph - self.height() - 6)
+        self.move(max(x, 4), max(y, 4)); self.show(); self.raise_()
+
+
+class MissionView(QWidget):
+    """Pick a mission -> see its populated 3D scene; click objects for info."""
+    def __init__(self, bin_path, index_path, parent=None):
+        super().__init__(parent)
+        self._bin = str(bin_path)
+        self._idx = str(index_path) if index_path else None
+        self._scene = None
+        self.setWindowTitle("AC1mod — Missions")
+        self.resize(940, 680)
+        lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8)
+
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Mission:"))
+        self._combo = QComboBox()
+        from core.mission import mission_names
+        names = mission_names(self._bin, self._idx)
+        for n in range(50):
+            nm = names.get(n, "")
+            self._combo.addItem(f"{n:02d}  {nm}".rstrip())
+        self._combo.currentIndexChanged.connect(self._load)
+        bar.addWidget(self._combo, 1)
+        self._info = QLabel(""); self._info.setStyleSheet("color:#8fb0c8; font-size:11px;")
+        bar.addWidget(self._info)
+        lay.addLayout(bar)
+
+        self.canvas = _RasterCanvas()
+        self.canvas.picked.connect(self._on_pick)
+        lay.addWidget(self.canvas, 1)
+        self.card = _InfoCard(self.canvas)
+        hint = QLabel("drag = orbit · wheel = zoom · click a marker for info")
+        hint.setStyleSheet("color:#6B8AA0; font-size:11px;")
+        lay.addWidget(hint)
+        self._combo.setCurrentIndex(1)
+        self._load(1)
+
+    def _load(self, n):
+        from core.mission import mission_scene, TYPE_LABELS
+        self.card.hide()
+        try:
+            self._scene, self._spawns = mission_scene(self._bin, n, self._idx)
+        except Exception as ex:
+            self._info.setText(f"load error: {ex}"); return
+        self._tlabels = TYPE_LABELS
+        self.canvas.set_arrays(self._scene.to_arrays())
+        kinds = len({s["typ"] for s in self._spawns})
+        self._info.setText(f"{len(self._spawns)} objects · {kinds} types")
+
+    def _on_pick(self, oid, pos):
+        if oid < 0 or not self._scene or oid >= len(self._scene.objects):
+            self.card.hide(); return
+        o = self._scene.objects[oid]; m = o.meta
+        tlabel = self._tlabels.get(m["type"], f"type {m['type']}")
+        rows = [f"<b>{tlabel}</b>",
+                f"type id: {m['type']}",
+                f"position: {m['pos']}",
+                f"facing: {m['rot_deg']}°",
+                f"geometry block: {m['block']}"]
+        # Per-instance params hw8..hw19 (RE: no global per-type stat table; these
+        # spawn-record values carry the per-instance numbers — labels are best-guess
+        # pending a DuckStation confirm; hw11 is the leading HP candidate).
+        from core.mission import PARAM_LABELS
+        p = m["params"]
+        shown = [(PARAM_LABELS.get(i, f"hw{i+8}"), v) for i, v in enumerate(p) if v]
+        if shown:
+            rows.append("<hr>")
+            rows += [f"{lbl}: {v}" for lbl, v in shown]
+        self.card.show_info("<br>".join(rows), pos)
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
@@ -1667,6 +1830,15 @@ class MainWindow(QMainWindow):
         self._audio_extract_worker: AudioExtractWorker | None = None
         self._build_ui()
         self._auto_load_recent_project()
+
+    def _on_open_missions(self):
+        bin_path = self.project.bin_path or getattr(self.detail_panel, "_bin_path", None)
+        if not bin_path:
+            QMessageBox.information(self, "Missions", "Open a BIN / project first.")
+            return
+        idx = self.project.index_path or INDEX_PATH
+        self._mission_view = MissionView(bin_path, idx)
+        self._mission_view.show()
 
     def _build_ui(self):
         toolbar = QWidget()
@@ -1693,6 +1865,11 @@ class MainWindow(QMainWindow):
         )
         self.bin_label.hide()
         tb_layout.addWidget(self.bin_label)
+
+        self.missions_btn = QPushButton("🎯 Missions")
+        self.missions_btn.setStyleSheet(self._btn_style())
+        self.missions_btn.clicked.connect(self._on_open_missions)
+        tb_layout.addWidget(self.missions_btn)
 
         tb_layout.addStretch()
 

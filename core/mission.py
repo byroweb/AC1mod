@@ -19,6 +19,40 @@ from core.fdat import mission_entry
 SPAWN_CHUNK = 12
 REC = 40
 
+# Filled in as object/MT stat tables are reverse-engineered (agent task). Maps a
+# spawn type id -> a human label; empty -> shown as "type N".
+TYPE_LABELS: dict = {}
+
+# Per-instance spawn params hw8..hw19 (index 0..11). RE found NO global per-type
+# stat table — these in-record values carry per-instance numbers. Labels are
+# best-guess pending a DuckStation HP/damage confirm; hw11 (index 3) is the
+# leading HP candidate.
+PARAM_LABELS = {3: "HP? (hw11)", 4: "hw12 (range/area?)", 0: "hw8 (AI?)"}
+
+MIS_SECTORS = (101920, 103449)   # MIS.T (mission text corpus)
+
+
+def mission_names(bin_path, index_path=None):
+    """{mission_number: name} from MIS.T entry 0 (0x20-byte stride name array)."""
+    import re
+    try:
+        ents = PP.read_container(bin_path, *MIS_SECTORS)
+    except Exception:
+        return {}
+    e0 = ents[0] if ents else b""
+    names = {}
+    for m in range(64):
+        off = 0x100 + m * 0x20
+        if off + 2 > len(e0):
+            break
+        end = e0.find(b">", off, off + 0x20)
+        if end <= off:
+            continue
+        raw = e0[off:end]
+        if all(0x20 <= c < 0x7f for c in raw):
+            names[m] = raw.decode("ascii", "replace")
+    return names
+
 
 def _walk_chunks(buf, limit=64):
     off = 0
