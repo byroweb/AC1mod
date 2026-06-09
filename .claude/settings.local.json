@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile core/jpsxdec.py)",
+      "Bash(python3 -m py_compile main.py)",
+      "Bash(python3 -m py_compile main.py core/project.py)",
+      "Bash(python3 -m py_compile core/workers.py)",
+      "Bash(python3 -m py_compile core/project.py)",
+      "Bash(python3 -m py_compile core/jpsxdec.py core/project.py core/workers.py main.py)",
+      "WebFetch(domain:psx.arthus.net)",
+      "Bash(python3 -c \"from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput; print\\('ok'\\)\")",
+      "Bash(pip3 show *)",
+      "Bash(python3 -c \"import subprocess; print\\(subprocess.run\\(['aplay','--version'],capture_output=True,text=True\\).stdout[:40]\\)\")",
+      "Bash(python3 -c \"import pygame; print\\('pygame ok'\\)\")",
+      "Bash(python3 -c \"import sounddevice; print\\('sounddevice ok'\\)\")",
+      "Bash(python3 main.py)",
+      "Bash(import -window root /tmp/psxmod_launch.png)",
+      "Bash(python3)",
+      "Bash(python3 -c ' *)",
+      "Bash(mkdir -p /tmp/pa_files)",
+      "Bash(java -jar '/home/byron/Desktop/PSXmod app/psxmod_v5/psxmod/tools/jpsxdec/jpsxdec.jar' -x '/home/byron/Desktop/PSXmod app/psxmod_v5/psxmod/jpsxdec.idx' -i 2506 -dir /tmp/pa_files)",
+      "Read(//tmp/**)",
+      "Bash(find \"/home/byron/Desktop/PSXmod app/psxmod_v5\" -name \"jpsxdec*.jar\" 2>/dev/null)",
+      "Read(//home/byron/Desktop/PSXmod app/psxmod_v5/**)",
+      "Bash(xxd /tmp/pa_files/GG/P0/PA00.T)",
+      "Bash(java -jar jpsxdec/jpsxdec.jar -x \"GG/P0/PA00.T\" -idx jpsxdec.idx -d /tmp/pa_extract)",
+      "Bash(java -jar jpsxdec/jpsxdec.jar -x \"GG/P0/PA07.T\" -idx jpsxdec.idx -d /tmp/pa_extract)",
+      "Bash(java -jar jpsxdec/jpsxdec.jar -x \"GG/P0/PA11.T\" -idx jpsxdec.idx -d /tmp/pa_extract)",
+      "Bash(wait)",
+      "Bash(.venv/bin/python main.py)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(python -c \"import main\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/byron/Desktop/PSXmod app/psxmod_v5/psxmod/main.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
+    ]
+  }
+}
