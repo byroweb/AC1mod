@@ -1,5 +1,5 @@
 """
-PSXmod main window — v4
+AC1mod main window — v4 (PSXmod fork)
 """
 import sys
 import re
@@ -1496,7 +1496,7 @@ class DetailPanel(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PSXmod")
+        self.setWindowTitle("AC1mod")
         self.resize(1100, 680)
         self.project = Project()
         self.entries: list[IndexEntry] = []
@@ -1513,7 +1513,7 @@ class MainWindow(QMainWindow):
         tb_layout.setContentsMargins(10, 6, 10, 6)
         tb_layout.setSpacing(6)
 
-        self.app_label = QLabel("PSXmod")
+        self.app_label = QLabel("AC1mod")
         self.app_label.setStyleSheet("font-size:14px; font-weight:600; color:#ECEFF1;")
         tb_layout.addWidget(self.app_label)
 
@@ -1653,7 +1653,7 @@ class MainWindow(QMainWindow):
                 self.bin_label.setText(str(bin_path))
                 self.bin_label.show()
                 self.open_bin_btn.hide()
-                self.setWindowTitle(f"PSXmod — {bin_path.name}")
+                self.setWindowTitle(f"AC1mod — {bin_path.name}")
             self.save_proj_btn.setEnabled(True)
             self.status.showMessage("Loading index from project…")
             from core.jpsxdec import parse_index_file
@@ -1730,7 +1730,7 @@ class MainWindow(QMainWindow):
         self.bin_label.setText(str(bin_path))
         self.bin_label.show()
         self.open_bin_btn.hide()
-        self.setWindowTitle(f"PSXmod — {bin_path.name}")
+        self.setWindowTitle(f"AC1mod — {bin_path.name}")
 
         self.detail_panel.set_index_path(INDEX_PATH)
         self.detail_panel.set_bin_path(bin_path)
@@ -1795,7 +1795,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open project", "", "PSXmod project (*.psxmod);;All files (*)"
+            self, "Open project", "", "AC1mod project (*.ac1mod *.psxmod);;All files (*)"
         )
         if not path:
             return
@@ -1937,7 +1937,7 @@ class MainWindow(QMainWindow):
             default_proj = str(WORKSPACE_DIR / f"{self.project.name}.psxmod")
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save project", default_proj,
-                "PSXmod project (*.psxmod)"
+                "AC1mod project (*.ac1mod *.psxmod)"
             )
             if not path:
                 return
@@ -1993,7 +1993,7 @@ QToolTip {
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("PSXmod")
+    app.setApplicationName("AC1mod")
     app.setStyleSheet(_GLOBAL_QSS)
     win = MainWindow()
     win.show()
