@@ -12,7 +12,7 @@ stream of variable-length primitive records (tri/quad, flat/textured) whose uint
 indices are pool-relative. We decode that into a flat Mesh for rendering/export.
 """
 from __future__ import annotations
-import struct, collections
+import struct, collections, math
 from dataclasses import dataclass, field
 
 RAW, SECDATA_OFF, DATA = 2352, 24, 2048   # Mode-2/Form-1 sector geometry
@@ -20,13 +20,16 @@ RAW, SECDATA_OFF, DATA = 2352, 24, 2048   # Mode-2/Form-1 sector geometry
 # Per primitive type (byte[3] & 0xBC): (vertex-index byte offset in record, #verts).
 # CONFIRMED: 0x20,0x28,0x24,0x2c.  TENTATIVE: gouraud 0x34/0x3c (faces with any
 # out-of-range index are dropped, so the mesh stays valid).
+# Each record begins with a per-poly running-counter halfword; the REAL vertex
+# indices follow it. Offsets below already skip the counter (corrected by visual
+# RE — meshes go from spiky to clean solids once the counter is skipped).
 PRIM_VERTS = {
-    0x20: (0x08, 3), 0x28: (0x08, 4),     # flat tri / quad        CONFIRMED
-    0x24: (0x12, 3), 0x2c: (0x14, 4),     # textured tri / quad    CONFIRMED
-    0x34: (0x12, 3), 0x3c: (0x12, 4),     # gouraud tri / quad     tentative
-    0xa0: (0x08, 3), 0xa8: (0x08, 4),
-    0xa4: (0x12, 3), 0xac: (0x14, 4),
-    0xb4: (0x12, 3), 0xbc: (0x12, 4),
+    0x20: (0x0a, 3), 0x28: (0x0a, 4),     # flat tri / quad        CONFIRMED
+    0x24: (0x12, 3), 0x2c: (0x16, 4),     # textured tri / quad    CONFIRMED
+    0x34: (0x14, 3), 0x3c: (0x14, 4),     # gouraud tri / quad     tentative
+    0xa0: (0x0a, 3), 0xa8: (0x0a, 4),
+    0xa4: (0x12, 3), 0xac: (0x16, 4),
+    0xb4: (0x14, 3), 0xbc: (0x14, 4),
 }
 
 
@@ -157,8 +160,10 @@ def parse_block(block) -> Mesh:
             if len(g) == 3:
                 m.faces.append(Face(g, color, _textured(typ)))
             elif len(g) == 4:
+                # PSX 4-pt polys use Z/N vertex order (diagonal = v1-v2), so the
+                # two tris are (0,1,2) and (1,3,2) — NOT a (0,1,2)+(0,2,3) fan.
                 m.faces.append(Face((g[0], g[1], g[2]), color, _textured(typ)))
-                m.faces.append(Face((g[0], g[2], g[3]), color, _textured(typ)))
+                m.faces.append(Face((g[1], g[3], g[2]), color, _textured(typ)))
     return m
 
 
@@ -177,25 +182,43 @@ def parse_pa_blocks(bin_path, sector_start, sector_end):
     return out
 
 
-def combined_mesh(bin_path, sector_start, sector_end, spacing=1.4) -> Mesh:
+def largest_block(blocks):
+    """Pick the (entry_index, Mesh) with the most faces — the 'main' object."""
+    return max(blocks, key=lambda b: len(b[1].faces), default=None)
+
+
+def contact_sheet(bin_path, sector_start, sector_end, cell=100.0, gap=1.5) -> Mesh:
     """
-    All geometry blocks laid out in a horizontal 'film strip' (offset by bbox width
-    so they don't overlap) — a contact sheet of everything in the PA file, useful
-    for figuring out *what* a PA file contains.
+    All geometry blocks as a NORMALIZED GRID: each block is centred and scaled so
+    its largest dimension == `cell`, then placed in a square grid. A genuine
+    contact sheet of every object in the PA file (small props and big stages show
+    at comparable size), for figuring out *what* a PA file contains.
     """
+    blocks = parse_pa_blocks(bin_path, sector_start, sector_end)
     out = Mesh()
-    cursor_x = 0.0
-    for (ei, m) in parse_pa_blocks(bin_path, sector_start, sector_end):
+    n = len(blocks)
+    if not n:
+        return out
+    cols = max(1, math.ceil(math.sqrt(n)))
+    step = cell * gap
+    for k, (ei, m) in enumerate(blocks):
         bb = m.bbox()
         if not bb:
             continue
-        w = bb[3] - bb[0]
-        dx = cursor_x - bb[0]
+        cx, cy, cz = (bb[0]+bb[3])/2, (bb[1]+bb[4])/2, (bb[2]+bb[5])/2
+        dim = max(bb[3]-bb[0], bb[4]-bb[1], bb[5]-bb[2], 1.0)
+        s = cell / dim
+        gx = (k % cols) * step
+        gy = -(k // cols) * step
         base = len(out.vertices)
         out.groups.append((f"e{ei}", base, len(m.vertices)))
-        out.vertices.extend((v[0] + dx, v[1], v[2]) for v in m.vertices)
+        out.vertices.extend(((v[0]-cx)*s + gx, (v[1]-cy)*s + gy, (v[2]-cz)*s)
+                            for v in m.vertices)
         for fc in m.faces:
             out.faces.append(Face(tuple(base + i for i in fc.verts),
                                   fc.color, fc.textured))
-        cursor_x += w * spacing + 1
     return out
+
+
+# back-compat alias (old name)
+combined_mesh = contact_sheet

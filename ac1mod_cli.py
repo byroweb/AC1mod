@@ -127,13 +127,21 @@ def cmd_notes(proj, idx, args):
         print(f"{fid}: {txt}")
 
 
+def _pick_mesh(proj, fid, a, b, entry, want_all):
+    """entry N -> that block; --all -> contact sheet; default -> largest block."""
+    if entry is not None:
+        ents = pa_parser.read_container(proj.bin_path, a, b)
+        return pa_parser.parse_block(ents[entry])
+    if want_all:
+        return pa_parser.contact_sheet(proj.bin_path, a, b)
+    blocks = pa_parser.parse_pa_blocks(proj.bin_path, a, b)
+    big = pa_parser.largest_block(blocks)
+    return big[1] if big else pa_parser.Mesh()
+
+
 def cmd_obj(proj, idx, args):
     fid, a, b = find_pa(idx, args.file)
-    if args.entry is not None:
-        ents = pa_parser.read_container(proj.bin_path, a, b)
-        mesh = pa_parser.parse_block(ents[args.entry])
-    else:
-        mesh = pa_parser.combined_mesh(proj.bin_path, a, b)
+    mesh = _pick_mesh(proj, fid, a, b, args.entry, getattr(args, "all", False))
     out = args.out or f"/tmp/{os.path.basename(fid).replace('.', '_')}.obj"
     lines = ["# AC1mod OBJ export", f"# {fid}"]
     for v in mesh.vertices:
@@ -149,11 +157,7 @@ def cmd_render(proj, idx, args):
     from core.render import render_mesh
     import math
     fid, a, b = find_pa(idx, args.file)
-    if args.entry is not None:
-        ents = pa_parser.read_container(proj.bin_path, a, b)
-        mesh = pa_parser.parse_block(ents[args.entry])
-    else:
-        mesh = pa_parser.combined_mesh(proj.bin_path, a, b)
+    mesh = _pick_mesh(proj, fid, a, b, args.entry, getattr(args, "all", False))
     out = args.out or f"/tmp/{os.path.basename(fid).replace('.', '_')}.png"
     img = render_mesh(mesh, args.w, args.h,
                       yaw=math.radians(args.yaw), pitch=math.radians(args.pitch),
@@ -173,10 +177,15 @@ def main():
     p = sub.add_parser("note", help="get/set a PA note")
     p.add_argument("action", choices=["get", "set"]); p.add_argument("file")
     p.add_argument("text", nargs="?", default="")
-    p = sub.add_parser("obj", help="export OBJ"); p.add_argument("file")
-    p.add_argument("--entry", type=int); p.add_argument("-o", "--out")
-    p = sub.add_parser("render", help="render a PNG preview"); p.add_argument("file")
-    p.add_argument("--entry", type=int)
+    p = sub.add_parser("obj", help="export OBJ (default: largest object)")
+    p.add_argument("file")
+    p.add_argument("--entry", type=int); p.add_argument("--all", action="store_true",
+                   help="whole-file contact sheet instead of the largest object")
+    p.add_argument("-o", "--out")
+    p = sub.add_parser("render", help="render a PNG (default: largest object)")
+    p.add_argument("file")
+    p.add_argument("--entry", type=int); p.add_argument("--all", action="store_true",
+                   help="whole-file contact-sheet grid instead of the largest object")
     p.add_argument("--yaw", type=float, default=35); p.add_argument("--pitch", type=float, default=25)
     p.add_argument("--zoom", type=float, default=1.0)
     p.add_argument("--w", type=int, default=640); p.add_argument("--h", type=int, default=460)

@@ -848,21 +848,27 @@ class ModelView3D(QWidget):
         self._blocks = pa_parser.parse_pa_blocks(bin_path, sec0, sec1)
         self._combo.blockSignals(True)
         self._combo.clear()
-        self._combo.addItem(f"ALL ({len(self._blocks)} objects)")
+        self._combo.addItem(f"◇ contact sheet ({len(self._blocks)} objects)")
         for ei, m in self._blocks:
             self._combo.addItem(f"entry {ei}  ({m.stats()['faces']} faces)")
-        self._combo.setCurrentIndex(0)
+        # Default to the biggest single object (the contact sheet is just an index).
+        default = 0
+        if self._blocks:
+            big = max(range(len(self._blocks)),
+                      key=lambda i: len(self._blocks[i][1].faces))
+            default = big + 1
+        self._combo.setCurrentIndex(default)
         self._combo.blockSignals(False)
         self._loading = True
         self.notes.setPlainText(note)
         self._loading = False
-        self._render_index(0)
+        self._render_index(default)
 
     def _render_index(self, i):
         from core import pa_parser
         if i <= 0:
-            mesh = pa_parser.combined_mesh(self._bin, *self._sec)
-            label = f"ALL — {len(self._blocks)} objects"
+            mesh = pa_parser.contact_sheet(self._bin, *self._sec)
+            label = f"contact sheet — {len(self._blocks)} objects"
         else:
             _, mesh = self._blocks[i - 1]
             label = self._combo.currentText().strip()
