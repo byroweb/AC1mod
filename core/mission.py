@@ -101,9 +101,19 @@ def _marker_mesh(size=400.0):
     return m
 
 
-def mission_scene(bin_path, n, index_path=None, marker_size=None):
-    """Build a Scene of typed markers at each spawn (info-only metadata attached)."""
+def mission_scene(bin_path, n, index_path=None, marker_size=None,
+                  level=False, ceilings=True):
+    """Build a Scene of typed markers at each spawn (info-only metadata attached).
+    level=True also places the mission's ASSEMBLED walkable level (core/level.py,
+    placement solved 2026-06-12); ceilings=False drops ceiling faces (the toggle)."""
     sc = Scene()
+    if level:
+        from core.level import level_mesh
+        lm = level_mesh(bin_path, n, index_path, ceilings=ceilings)
+        if lm.vertices:
+            sc.add(SceneObject(name="level", mesh=lm,
+                               meta={"sections": len(lm.groups),
+                                     "ceilings": ceilings}))
     sp = spawns(bin_path, n, index_path)
     if marker_size is None and sp:
         xs = [s["x"] for s in sp]; zs = [s["z"] for s in sp]

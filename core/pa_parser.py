@@ -17,19 +17,22 @@ from dataclasses import dataclass, field
 
 RAW, SECDATA_OFF, DATA = 2352, 24, 2048   # Mode-2/Form-1 sector geometry
 
-# Per primitive type (byte[3] & 0xBC): (vertex-index byte offset in record, #verts).
-# CONFIRMED: 0x20,0x28,0x24,0x2c.  TENTATIVE: gouraud 0x34/0x3c (faces with any
-# out-of-range index are dropped, so the mesh stays valid).
-# Each record begins with a per-poly running-counter halfword; the REAL vertex
-# indices follow it. Offsets below already skip the counter (corrected by visual
-# RE — meshes go from spiky to clean solids once the counter is skipped).
+# Per primitive type (byte[3] & 0xBC): (first vertex-index byte offset, #verts, stride).
+# RE'd LIVE from the relocation-walker per-type handlers (jump table 0x8004B184),
+# disassembled from the running game (2026-06-11). In each handler a1 = record+4;
+# halfwords shifted <<4 (×16) are VERTEX-position indices, <<3 (×8) are normal/colour
+# indices. Flat/textured types pack their vertex indices CONTIGUOUSLY (stride 2);
+# GOURAUD 0x34/0x3c interleave [normal_idx, vertex_idx] pairs → vertex stride 4.
+# CONFIRMED: 0x20,0x28,0x24,0x2c.  RESOLVED 2026-06-11: gouraud 0x34/0x3c (was the
+# 5-30% out-of-range bug — old contiguous-from-0x14 read normal indices as vertices;
+# new layout = 0 OOR across all 72 PA files. See AC_1_USA_RE/docs/PA_FORMAT.md).
 PRIM_VERTS = {
-    0x20: (0x0a, 3), 0x28: (0x0a, 4),     # flat tri / quad        CONFIRMED
-    0x24: (0x12, 3), 0x2c: (0x16, 4),     # textured tri / quad    CONFIRMED
-    0x34: (0x14, 3), 0x3c: (0x14, 4),     # gouraud tri / quad     tentative
-    0xa0: (0x0a, 3), 0xa8: (0x0a, 4),
-    0xa4: (0x12, 3), 0xac: (0x16, 4),
-    0xb4: (0x14, 3), 0xbc: (0x14, 4),
+    0x20: (0x0a, 3, 2), 0x28: (0x0a, 4, 2),   # flat tri / quad        CONFIRMED
+    0x24: (0x12, 3, 2), 0x2c: (0x16, 4, 2),   # textured tri / quad    CONFIRMED
+    0x34: (0x12, 3, 4), 0x3c: (0x16, 4, 4),   # gouraud tri / quad     RESOLVED live
+    0xa0: (0x0a, 3, 2), 0xa8: (0x0a, 4, 2),
+    0xa4: (0x12, 3, 2), 0xac: (0x16, 4, 2),
+    0xb4: (0x12, 3, 2), 0xbc: (0x12, 4, 2),   # high-bit textured variants (stride unverified)
 }
 
 
@@ -128,9 +131,9 @@ def _read_prims(block, off, cnt):
             break
         info = PRIM_VERTS.get(typ)
         if info:
-            voff, nv = info
-            idx = [struct.unpack_from("<H", block, o + voff + 2 * k)[0]
-                   for k in range(nv) if o + voff + 2 * k + 2 <= len(block)]
+            voff, nv, stride = info
+            idx = [struct.unpack_from("<H", block, o + voff + stride * k)[0]
+                   for k in range(nv) if o + voff + stride * k + 2 <= len(block)]
             # flat types carry an RGB colour word right after the 4-byte header
             color = (170, 170, 170)
             if not _textured(typ) and o + 7 <= len(block):

@@ -1798,6 +1798,14 @@ class MissionView(QWidget):
             self._combo.addItem(f"{n:02d}  {nm}".rstrip())
         self._combo.currentIndexChanged.connect(self._load)
         bar.addWidget(self._combo, 1)
+        # walkable level (placement solved 2026-06-12) + the ceiling toggle
+        self._level_cb = QCheckBox("Level"); self._level_cb.setChecked(True)
+        self._level_cb.setToolTip("show the mission's assembled walkable level")
+        self._ceil_cb = QCheckBox("Ceilings"); self._ceil_cb.setChecked(False)
+        self._ceil_cb.setToolTip("show ceiling faces (off = see into indoor levels)")
+        self._level_cb.toggled.connect(lambda _: self._load(self._combo.currentIndex()))
+        self._ceil_cb.toggled.connect(lambda _: self._load(self._combo.currentIndex()))
+        bar.addWidget(self._level_cb); bar.addWidget(self._ceil_cb)
         self._info = QLabel(""); self._info.setStyleSheet("color:#8fb0c8; font-size:11px;")
         bar.addWidget(self._info)
         lay.addLayout(bar)
@@ -1816,18 +1824,29 @@ class MissionView(QWidget):
         from core.mission import mission_scene, TYPE_LABELS
         self.card.hide()
         try:
-            self._scene, self._spawns = mission_scene(self._bin, n, self._idx)
+            self._scene, self._spawns = mission_scene(
+                self._bin, n, self._idx,
+                level=self._level_cb.isChecked(),
+                ceilings=self._ceil_cb.isChecked())
         except Exception as ex:
             self._info.setText(f"load error: {ex}"); return
         self._tlabels = TYPE_LABELS
         self.canvas.set_arrays(self._scene.to_arrays())
         kinds = len({s["typ"] for s in self._spawns})
-        self._info.setText(f"{len(self._spawns)} objects · {kinds} types")
+        has_level = any(o.name == "level" for o in self._scene.objects)
+        lvl = "" if not self._level_cb.isChecked() else \
+            (" · level ✓" if has_level else " · no level table (shared scene)")
+        self._info.setText(f"{len(self._spawns)} objects · {kinds} types{lvl}")
 
     def _on_pick(self, oid, pos):
         if oid < 0 or not self._scene or oid >= len(self._scene.objects):
             self.card.hide(); return
         o = self._scene.objects[oid]; m = o.meta
+        if "type" not in m:                      # the level mesh itself
+            self.card.show_info(
+                f"<b>walkable level</b><br>{m.get('sections', '?')} placed sections"
+                f"<br>ceilings: {'on' if m.get('ceilings') else 'off'}", pos)
+            return
         tlabel = self._tlabels.get(m["type"], f"type {m['type']}")
         rows = [f"<b>{tlabel}</b>",
                 f"type id: {m['type']}",

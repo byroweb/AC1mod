@@ -169,6 +169,42 @@ def cmd_render(proj, idx, args):
     print(f"wrote {out}  ({len(mesh.faces)} faces, view yaw={args.yaw} pitch={args.pitch})")
 
 
+def cmd_level(proj, idx, args):
+    """Render / export a mission's ASSEMBLED walkable level (real placement)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import math
+    from core.level import level_mesh, level_obj_lines
+    n = args.mission
+    ceilings = not args.no_ceiling
+    if args.obj:
+        lines, nv, counts = level_obj_lines(proj.bin_path, n, str(idx))
+        Path(args.obj).write_text("\n".join(lines) + "\n")
+        print(f"wrote {args.obj}  ({nv} verts, {counts})")
+    mesh = level_mesh(proj.bin_path, n, str(idx), ceilings=ceilings)
+    if not mesh.vertices:
+        sys.exit(f"mission {n}: no chunk-7 placement table (shared-scene mission?)")
+    if args.spawns:
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        from core.mission import mission_scene
+        from core import raster
+        sc, sp = mission_scene(proj.bin_path, n, str(idx),
+                               level=True, ceilings=ceilings)
+        V, VN, F, Fcol, Fid = sc.to_arrays()
+        img, _ = raster.render(V, VN, F, Fcol, Fid, args.w, args.h,
+                               yaw=math.radians(args.yaw), pitch=math.radians(args.pitch),
+                               zoom=args.zoom)
+    else:
+        from core.render import render_mesh
+        img = render_mesh(mesh, args.w, args.h, yaw=math.radians(args.yaw),
+                          pitch=math.radians(args.pitch), zoom=args.zoom,
+                          wire=args.wire)
+    out = args.out or f"/tmp/ac1_level_{n:02d}.png"
+    img.save(out)
+    print(f"wrote {out}  (mission {n}, {len(mesh.groups)} sections, "
+          f"{len(mesh.faces)} faces, ceilings={'on' if ceilings else 'OFF'})")
+
+
 def cmd_missions(proj, idx, args):
     """Batch-render every mission's populated 3D scene to PNGs."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -183,10 +219,12 @@ def cmd_missions(proj, idx, args):
     done = 0
     for n in range(args.first, args.last + 1):
         try:
-            sc, sp = mission_scene(proj.bin_path, n, str(idx))
+            sc, sp = mission_scene(proj.bin_path, n, str(idx),
+                                   level=getattr(args, "level", False),
+                                   ceilings=not getattr(args, "no_ceiling", False))
         except Exception as ex:
             print(f"  mission {n}: error {ex}"); continue
-        if not sp:
+        if not sp and not sc.objects:
             continue
         V, VN, F, Fcol, Fid = sc.to_arrays()
         img, _ = raster.render(V, VN, F, Fcol, Fid, args.w, args.h,
@@ -288,6 +326,20 @@ def main():
     p.add_argument("--yaw", type=float, default=30); p.add_argument("--pitch", type=float, default=42)
     p.add_argument("--zoom", type=float, default=1.4)
     p.add_argument("--w", type=int, default=900); p.add_argument("--h", type=int, default=700)
+    p.add_argument("--level", action="store_true",
+                   help="include the assembled walkable level under the spawns")
+    p.add_argument("--no-ceiling", action="store_true",
+                   help="drop ceiling faces (see into indoor levels)")
+    p = sub.add_parser("level", help="render/export a mission's assembled walkable level")
+    p.add_argument("mission", type=int)
+    p.add_argument("--no-ceiling", action="store_true",
+                   help="drop ceiling faces (see into indoor levels)")
+    p.add_argument("--spawns", action="store_true", help="overlay spawn markers")
+    p.add_argument("--obj", help="also export OBJ (o floor/ceiling/wall groups)")
+    p.add_argument("--yaw", type=float, default=30); p.add_argument("--pitch", type=float, default=55)
+    p.add_argument("--zoom", type=float, default=1.0)
+    p.add_argument("--w", type=int, default=1000); p.add_argument("--h", type=int, default=800)
+    p.add_argument("--wire", action="store_true"); p.add_argument("-o", "--out")
     p = sub.add_parser("info", help="geometry stats for a PA file"); p.add_argument("file")
     p = sub.add_parser("note", help="get/set a PA note")
     p.add_argument("action", choices=["get", "set"]); p.add_argument("file")
@@ -312,6 +364,7 @@ def main():
     _, proj, idx = load(args.project)
     {"list": cmd_list, "notes": cmd_notes, "info": cmd_info, "note": cmd_note,
      "obj": cmd_obj, "render": cmd_render, "missions": cmd_missions,
+     "level": cmd_level,
      "mistim": cmd_mistim, "memcard": cmd_memcard}[args.cmd](proj, idx, args)
 
 
