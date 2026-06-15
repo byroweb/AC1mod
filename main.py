@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem, QLabel, QPushButton,
     QFileDialog, QStatusBar, QMessageBox, QFrame, QGridLayout,
     QSizePolicy, QAbstractItemView, QPlainTextEdit, QSpinBox, QStackedWidget,
-    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QColor, QFont, QBrush, QPainter, QPen, QIcon
@@ -1031,6 +1030,27 @@ class DetailPanel(QWidget):
         self._stack.addWidget(self._model_view)  # index 3
         self._project = None
 
+        # ---- Page 4: welcome / empty state (shown until something is selected) ----
+        self._welcome = QLabel(
+            "<div style='font-size:22px; font-weight:600; color:#ECEFF1;'>AC1mod</div>"
+            "<div style='height:6px;'></div>"
+            "<div style='font-size:13px; color:#8fb0c8;'>Browse, preview and mod the assets "
+            "of <i>Armored Core</i> (SLUS-01323).</div>"
+            "<div style='height:18px;'></div>"
+            "<div style='font-size:12px; color:#6B8AA0; line-height:170%;'>"
+            "<b style='color:#8fb0c8;'>Open BIN</b> &nbsp;— browse the disc; preview images, "
+            "audio, text &amp; <b>3D&nbsp;PA##.T models</b>, and swap in replacements.<br>"
+            "<b style='color:#8fb0c8;'>🎯 Missions</b> &nbsp;— walk the populated 3D mission scenes "
+            "(needs a BIN open).<br>"
+            "<b style='color:#8fb0c8;'>💾 Memory Card</b> &nbsp;— edit your AC1 emblems "
+            "(works without a BIN).</div>")
+        self._welcome.setTextFormat(Qt.TextFormat.RichText)
+        self._welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._welcome.setWordWrap(True)
+        self._welcome.setStyleSheet("background:#2B3A47; padding:40px;")
+        self._stack.addWidget(self._welcome)  # index 4
+        self._stack.setCurrentIndex(4)         # start on the welcome page
+
     def set_project(self, project):
         self._project = project
 
@@ -1914,6 +1934,8 @@ class MemoryCardView(QWidget):
         self.resize(840, 560)
         self._card = None
         self._sel = None
+        self._emblem_save = None
+        self._cur_emblem = None
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8)
 
         bar = QHBoxLayout()
@@ -1925,10 +1947,15 @@ class MemoryCardView(QWidget):
         lay.addLayout(bar)
 
         split = QSplitter(Qt.Orientation.Horizontal)
-        self._list = QListWidget(); self._list.setIconSize(QSize(32, 32))
-        self._list.setMaximumWidth(280)
-        self._list.currentRowChanged.connect(self._on_select)
-        split.addWidget(self._list)
+        # Saves are top-level rows; the EMBLEM DATA save's 7 emblems hang off it as
+        # children (a real tree, expanded by default) so you can click through them.
+        self._tree = QTreeWidget(); self._tree.setHeaderHidden(True)
+        self._tree.setIconSize(QSize(32, 32))
+        self._tree.setMaximumWidth(280)
+        self._tree.setIndentation(14)
+        self._tree.currentItemChanged.connect(self._on_select)
+        self._emblem_items: dict[int, QTreeWidgetItem] = {}
+        split.addWidget(self._tree)
 
         right = QWidget(); rl = QVBoxLayout(right)
         self._title = QLabel("—"); self._title.setStyleSheet("font-weight:600; color:#ECEFF1;")
@@ -1948,23 +1975,34 @@ class MemoryCardView(QWidget):
         rl.addWidget(self._pal)
 
         btns = QHBoxLayout()
+        self._import_btn = QPushButton("import PNG/GIF…")
+        self._import_btn.clicked.connect(self._choose_import)
+        self._import_btn.setEnabled(False); btns.addWidget(self._import_btn)
         self._export_btn = QPushButton("export PNG…"); self._export_btn.clicked.connect(self._export_emblem)
         self._export_btn.setEnabled(False); btns.addWidget(self._export_btn)
         btns.addStretch()
         rl.addLayout(btns)
         self._note = QLabel(
-            "Drop/click the emblem to import a GIF/PNG — it's auto-matched to the\n"
-            "16-colour emblem palette and written back to the card. Emblem = 64×64 4bpp\n"
-            "(pixel offset DuckStation-pending; see docs/AC1_EMBLEM.md).")
+            "AC1 emblems live in the 'ARMORED CORE EMBLEM DATA' card file (7 of them);\n"
+            "they're listed individually on the left. Each has its OWN 16-colour palette.\n"
+            "Pick one, then 'import PNG/GIF…' (or drop/click the preview) — a custom palette\n"
+            "is built from it (index 0 = transparent) and only that emblem is changed.")
         self._note.setStyleSheet("color:#6B8AA0; font-size:10px;")
         rl.addWidget(self._note)
         rl.addStretch()
         split.addWidget(right)
         lay.addWidget(split, 1)
 
-        start = Path(card_path) if card_path else DEFAULT_CARD
-        if start.exists():
-            self._load_card(start)
+        # Only load when a card is explicitly passed; otherwise wait for the user
+        # to pick one ("open card…"). Auto-loading the DuckStation default card was
+        # never the card the user actually meant to edit.
+        if card_path and Path(card_path).exists():
+            self._load_card(Path(card_path))
+        else:
+            self._title.setText("Open a memory card to begin")
+            self._meta.setText("Click “open card…” and pick a PS1 memory card "
+                               "(.mcd/.mcr/.srm/…). AC1 emblems will appear as editable rows.")
+            self._emblem.setText("(no card open)")
 
     # ---- card loading ----
     def _choose_card(self):
@@ -1982,79 +2020,148 @@ class MemoryCardView(QWidget):
             QMessageBox.warning(self, "Memory Card", f"Could not read card:\n{ex}"); return
         self._path = path
         self._path_lbl.setText(str(path))
-        self._list.clear()
+        self._emblem_save = self._card.emblem_file()
+        self._cur_emblem = None
+        self._emblem_items.clear()
+        self._tree.clear()
+        # Each item carries ("save", SaveFile) or ("emblem", index). The EMBLEM
+        # DATA save's 7 emblems hang off it as child rows so you click through them
+        # like project files, each with its decoded thumbnail.
+        first_emblem_item = None
         for s in self._card.saves:
-            it = QListWidgetItem(f"slot{s.slot}  {s.label}")
+            top = QTreeWidgetItem([f"slot{s.slot}  {s.label}"])
             r = self._card.icon_rgba(s)
             if r:
-                it.setIcon(QIcon(_rgba_to_pixmap(*r)))
+                top.setIcon(0, QIcon(_rgba_to_pixmap(*r)))
             if not s.is_ac1:
-                it.setForeground(QColor("#6B7B88"))
-            it.setData(Qt.ItemDataRole.UserRole, s.slot)
-            self._list.addItem(it)
-        if self._card.saves:
-            self._list.setCurrentRow(0)
+                top.setForeground(0, QColor("#6B7B88"))
+            top.setData(0, Qt.ItemDataRole.UserRole, ("save", s))
+            self._tree.addTopLevelItem(top)
+            if s.is_emblem:
+                self._add_emblem_rows(top, s)
+                top.setExpanded(True)           # emblems visible by default
+                if top.childCount():
+                    first_emblem_item = top.child(0)
+        # Default to the first emblem if the card has them, else the first save.
+        if first_emblem_item is not None:
+            self._tree.setCurrentItem(first_emblem_item)
+        elif self._tree.topLevelItemCount():
+            self._tree.setCurrentItem(self._tree.topLevelItem(0))
         else:
             self._title.setText("(no saves on this card)")
 
-    def _on_select(self, row):
+    def _add_emblem_rows(self, parent_item, save):
         from core import memcard as M
-        if not self._card or row < 0 or row >= len(self._card.saves):
+        fb = self._card.file_bytes(save)
+        for i in range(M.EMBLEM_COUNT):
+            blank = M.is_emblem_blank(fb, i)
+            it = QTreeWidgetItem([f"emblem {i}" + ("  (blank)" if blank else "")])
+            it.setIcon(0, QIcon(_rgba_to_pixmap(*M.decode_emblem(fb, i))))
+            it.setData(0, Qt.ItemDataRole.UserRole, ("emblem", i))
+            parent_item.addChild(it)
+            self._emblem_items[i] = it
+
+    def _on_select(self, current, _previous=None):
+        if not self._card or current is None:
             return
-        s = self._card.saves[row]; self._sel = s
+        data = current.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        kind, payload = data
+        if kind == "emblem":
+            self._show_emblem(payload)
+            return
+        s = payload; self._sel = s; self._cur_emblem = None
         self._title.setText(f"{s.label}    [{s.code}]")
         r = self._card.icon_rgba(s)
         if r:
             self._icon.setPixmap(_rgba_to_pixmap(r[0], r[1], r[2], 4))
-        blk = self._card.block_bytes(s.slot)
-        if s.is_ac1:
-            blank = M.is_emblem_blank(blk)
-            self._meta.setText(f"AC1 save · {s.size_blocks} block(s) · "
-                               f"emblem {'BLANK (not drawn yet)' if blank else 'drawn'}")
-            w, h, rgba = M.decode_emblem(blk)
-            self._emblem.setPixmap(_rgba_to_pixmap(w, h, rgba, 4))
-            self._pal.set_colors(M.emblem_palette(blk), "16")
-            self._emblem.setEnabled(True); self._export_btn.setEnabled(True)
+        self._emblem.setEnabled(False)
+        self._export_btn.setEnabled(False); self._import_btn.setEnabled(False)
+        if s.is_emblem:
+            self._meta.setText("ARMORED CORE EMBLEM DATA — pick one of the 7 emblems below.")
+        elif s.is_ac1:
+            self._meta.setText("AC1 career save — emblems are stored separately in the "
+                               "'ARMORED CORE EMBLEM DATA' file, listed below.")
         else:
             self._meta.setText("not an Armored Core 1 save — emblem editing is AC1-only.")
-            self._emblem.clear(); self._emblem.setText("(not an AC1 save)")
-            self._emblem.setEnabled(False); self._export_btn.setEnabled(False)
-            self._pal.clear()
+        self._emblem.clear(); self._emblem.setText("(select an emblem)")
+        self._pal.clear()
 
-    # ---- emblem import/export ----
+    def _show_emblem(self, index):
+        """Render emblem `index` from the card's EMBLEM DATA file."""
+        from core import memcard as M
+        if not self._emblem_save:
+            return
+        self._cur_emblem = index
+        self._sel = self._emblem_save
+        fb = self._card.file_bytes(self._emblem_save)
+        blank = M.is_emblem_blank(fb, index)
+        self._title.setText(f"emblem {index}    [ARMORED CORE EMBLEM DATA]")
+        self._meta.setText(f"emblem {index} of {M.EMBLEM_COUNT} · "
+                           f"{'BLANK (not drawn)' if blank else 'drawn'} · 64×64 4bpp")
+        w, h, rgba = M.decode_emblem(fb, index)
+        self._emblem.setPixmap(_rgba_to_pixmap(w, h, rgba, 4))
+        self._pal.set_colors(M.emblem_palette(fb, index), "16")
+        self._emblem.setEnabled(True)
+        self._export_btn.setEnabled(True); self._import_btn.setEnabled(True)
+
+    # ---- emblem import/export (operate on the currently selected emblem) ----
+    def _choose_import(self):
+        if not self._emblem_save or self._cur_emblem is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose emblem image", "", "Images (*.gif *.png *.bmp *.jpg *.jpeg)")
+        if path:
+            self._import_emblem(Path(path))
+
     def _import_emblem(self, img_path):
         from core import memcard as M
-        if not self._sel or not self._sel.is_ac1:
+        if not self._emblem_save or self._cur_emblem is None:
             return
+        index = self._cur_emblem
         if QMessageBox.question(
                 self, "Write emblem",
-                f"Match '{Path(img_path).name}' to the 16-colour emblem palette and "
-                f"write it into this save on\n{self._path}?\n\n"
+                f"Import '{Path(img_path).name}' into emblem #{index} on\n{self._path}?\n\n"
+                f"A custom 16-colour palette is generated from the image (index 0 = "
+                f"transparent). Only this emblem is changed.\n\n"
                 f"A backup (.bak) is made first.") != QMessageBox.StandardButton.Yes:
             return
         try:
-            blk = self._card.block_bytes(self._sel.slot)
-            data = M.encode_emblem(str(img_path), blk)
+            fb = self._card.file_bytes(self._emblem_save)
             bak = self._path.with_suffix(self._path.suffix + ".bak")
             if not bak.exists():
                 bak.write_bytes(self._path.read_bytes())
-            self._card.patch(self._sel.slot, M.EMBLEM_PIX_OFF, data)
+            self._card.write_file_bytes(self._emblem_save, M.write_emblem(fb, index, str(img_path)))
             self._card.save()
-            self._on_select(self._list.currentRow())
-            QMessageBox.information(self, "Emblem", "Emblem written to card.\n"
-                                    "If it looks offset in-game, the pixel offset needs the "
-                                    "DuckStation confirm (docs/AC1_EMBLEM.md).")
+            self._refresh_emblem_row(index)
+            self._show_emblem(index)
+            QMessageBox.information(self, "Emblem", f"Emblem #{index} written to card.")
         except Exception as ex:
             QMessageBox.warning(self, "Emblem", f"Import failed:\n{ex}")
 
+    def _refresh_emblem_row(self, index):
+        """Re-render the tree thumbnail/label for emblem `index` after a write.
+        Each emblem owns its palette, so only the edited emblem changes."""
+        from core import memcard as M
+        it = self._emblem_items.get(index)
+        if it is None:
+            return
+        fb = self._card.file_bytes(self._emblem_save)
+        blank = M.is_emblem_blank(fb, index)
+        it.setText(0, f"emblem {index}" + ("  (blank)" if blank else ""))
+        it.setIcon(0, QIcon(_rgba_to_pixmap(*M.decode_emblem(fb, index))))
+
     def _export_emblem(self):
         from core import memcard as M
-        if not self._sel:
+        if not self._emblem_save or self._cur_emblem is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export emblem PNG", "emblem.png", "PNG (*.png)")
+        index = self._cur_emblem
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export emblem PNG", f"emblem{index}.png", "PNG (*.png)")
         if not path:
             return
-        w, h, rgba = M.decode_emblem(self._card.block_bytes(self._sel.slot))
+        w, h, rgba = M.decode_emblem(self._card.file_bytes(self._emblem_save), index)
         _rgba_to_pixmap(w, h, rgba, 4).save(path)
 
 
@@ -2099,8 +2206,9 @@ class MainWindow(QMainWindow):
         tb_layout.addWidget(self.app_label)
 
         # BIN open button (hidden after a BIN is loaded)
-        self.open_bin_btn = QPushButton("open BIN")
+        self.open_bin_btn = QPushButton("Open BIN")
         self.open_bin_btn.setStyleSheet(self._btn_style())
+        self.open_bin_btn.setToolTip("Open a PlayStation BIN disc image to browse its assets")
         self.open_bin_btn.clicked.connect(self._on_open_bin)
         tb_layout.addWidget(self.open_bin_btn)
 
@@ -2113,42 +2221,56 @@ class MainWindow(QMainWindow):
         self.bin_label.hide()
         tb_layout.addWidget(self.bin_label)
 
+        tb_layout.addWidget(self._tb_sep())
+
+        # ---- Navigate: the three browsing surfaces ----
         self.missions_btn = QPushButton("🎯 Missions")
         self.missions_btn.setStyleSheet(self._btn_style())
+        self.missions_btn.setToolTip("View the populated 3D mission scenes (needs a BIN open)")
         self.missions_btn.clicked.connect(self._on_open_missions)
         tb_layout.addWidget(self.missions_btn)
 
         self.memcard_btn = QPushButton("💾 Memory Card")
         self.memcard_btn.setStyleSheet(self._btn_style())
+        self.memcard_btn.setToolTip("Browse a PS1 memory card and edit AC1 emblems")
         self.memcard_btn.clicked.connect(self._on_open_memcard)
         tb_layout.addWidget(self.memcard_btn)
 
         tb_layout.addStretch()
 
-        self.open_proj_btn = QPushButton("open project")
+        # ---- Project: load / save the .ac1mod project + extract assets ----
+        self.open_proj_btn = QPushButton("Open Project")
         self.open_proj_btn.setStyleSheet(self._btn_style())
+        self.open_proj_btn.setToolTip("Open a saved .ac1mod project")
         self.open_proj_btn.clicked.connect(self._on_open_project)
         tb_layout.addWidget(self.open_proj_btn)
 
-        self.save_proj_btn = QPushButton("save project")
+        self.save_proj_btn = QPushButton("Save Project")
         self.save_proj_btn.setStyleSheet(self._btn_style())
+        self.save_proj_btn.setToolTip("Open or build a BIN first")
         self.save_proj_btn.clicked.connect(self._on_save_project)
         self.save_proj_btn.setEnabled(False)
         tb_layout.addWidget(self.save_proj_btn)
 
-        self.extract_checked_btn = QPushButton("extract checked items")
+        self.extract_checked_btn = QPushButton("Extract Checked")
         self.extract_checked_btn.setStyleSheet(self._btn_style())
+        self.extract_checked_btn.setToolTip("Check items in the index to enable")
         self.extract_checked_btn.setEnabled(False)
         self.extract_checked_btn.clicked.connect(self._on_extract_checked)
         tb_layout.addWidget(self.extract_checked_btn)
 
-        self.export_btn = QPushButton("export xdelta")
+        tb_layout.addWidget(self._tb_sep())
+
+        # ---- Build: produce a patched output ----
+        self.export_btn = QPushButton("Export xdelta")
         self.export_btn.setStyleSheet(self._btn_style())
+        self.export_btn.setToolTip("Planned — xdelta patch export (coming in a follow-up)")
         self.export_btn.setEnabled(False)
         tb_layout.addWidget(self.export_btn)
 
-        self.build_btn = QPushButton("build patched BIN")
+        self.build_btn = QPushButton("Build Patched BIN")
         self.build_btn.setStyleSheet(self._btn_style(primary=True))
+        self.build_btn.setToolTip("Add a replacement asset to enable")
         self.build_btn.setEnabled(False)
         self.build_btn.clicked.connect(self._on_build_patched_bin)
         tb_layout.addWidget(self.build_btn)
@@ -2187,6 +2309,15 @@ class MainWindow(QMainWindow):
         )
         self.setStatusBar(self.status)
         self.status.showMessage("ready — open a BIN file to begin")
+
+    def _tb_sep(self) -> QFrame:
+        """A subtle vertical divider to group the toolbar into Navigate / Project /
+        Build clusters, matching the toolbar's slate palette."""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedHeight(20)
+        sep.setStyleSheet("color:rgba(255,255,255,0.25);")
+        return sep
 
     def _btn_style(self, primary=False) -> str:
         if primary:
@@ -2248,6 +2379,7 @@ class MainWindow(QMainWindow):
                 self.open_bin_btn.hide()
                 self.setWindowTitle(f"AC1mod — {bin_path.name}")
             self.save_proj_btn.setEnabled(True)
+            self.save_proj_btn.setToolTip("Save this project to a .ac1mod file")
             self.status.showMessage("Loading index from project…")
             from core.jpsxdec import parse_index_file
             entries = parse_index_file(idx)
@@ -2349,11 +2481,12 @@ class MainWindow(QMainWindow):
         self.index_panel.set_checked_entries(set(self.project.checked_entries))
         self._refresh_extract_btn()
         self.save_proj_btn.setEnabled(True)
+        self.save_proj_btn.setToolTip("Save this project to a .ac1mod file")
         self._update_build_btn()
         image_count = sum(1 for e in entries if e.is_image)
         self.status.showMessage(
             f"Loaded {len(entries)} entries ({image_count} images). "
-            "Expand a folder in the index to select an image."
+            "Expand a folder to preview images/audio/text — or open a PA##.T to view its 3D models."
         )
 
     def _on_entry_selected(self, current, _previous):
@@ -2399,6 +2532,8 @@ class MainWindow(QMainWindow):
     def _update_build_btn(self):
         has_replacements = bool(self.project.replacements or self.project.audio_replacements)
         self.build_btn.setEnabled(has_replacements)
+        self.build_btn.setToolTip("Write a patched BIN with your replacement assets"
+                                  if has_replacements else "Add a replacement asset to enable")
 
     def _on_replacement_saved(self, entry_number: int, tim_path: Path, meta_html: str):
         self.project.assign_replacement(entry_number, tim_path)
@@ -2443,6 +2578,7 @@ class MainWindow(QMainWindow):
 
     def _on_build_finished(self, success: int, fail: int, error: str):
         self.save_proj_btn.setEnabled(True)
+        self.save_proj_btn.setToolTip("Save this project to a .ac1mod file")
         self._update_build_btn()
         if error:
             QMessageBox.critical(self, "Build failed", error)
@@ -2470,7 +2606,7 @@ class MainWindow(QMainWindow):
 
     def _on_checked_changed(self, checked: set):
         self.project.checked_entries = sorted(checked)
-        self.extract_checked_btn.setEnabled(bool(checked))
+        self._set_extract_enabled(bool(checked))
         if self.project.project_path:
             try:
                 self.project.save(self.project.project_path)
@@ -2479,7 +2615,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_extract_btn(self):
         checked = self.index_panel.get_checked_entries()
-        self.extract_checked_btn.setEnabled(bool(checked))
+        self._set_extract_enabled(bool(checked))
+
+    def _set_extract_enabled(self, enabled: bool):
+        self.extract_checked_btn.setEnabled(enabled)
+        self.extract_checked_btn.setToolTip(
+            "Extract the checked items to disk" if enabled
+            else "Check items in the index to enable")
 
     def _on_extract_checked(self):
         import shutil as _shutil

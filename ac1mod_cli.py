@@ -180,10 +180,11 @@ def cmd_level(proj, idx, args):
         lines, nv, counts = level_obj_lines(proj.bin_path, n, str(idx))
         Path(args.obj).write_text("\n".join(lines) + "\n")
         print(f"wrote {args.obj}  ({nv} verts, {counts})")
-    mesh = level_mesh(proj.bin_path, n, str(idx), ceilings=ceilings)
+    materials = getattr(args, "materials", False)
+    mesh = level_mesh(proj.bin_path, n, str(idx), ceilings=ceilings, tint=not materials)
     if not mesh.vertices:
         sys.exit(f"mission {n}: no chunk-7 placement table (shared-scene mission?)")
-    if args.spawns:
+    if args.spawns and not materials:
         from PyQt6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
         from core.mission import mission_scene
@@ -262,44 +263,73 @@ DEFAULT_CARD = ("/home/byron/.local/share/duckstation/memcards/"
 
 
 def cmd_memcard(proj, idx, args):
-    """Browse a PS1 memory card; view/export/import AC1 emblems."""
+    """Browse a PS1 memory card; view/export/import AC1 emblems.
+
+    Emblems live in the separate 'ARMORED CORE EMBLEM DATA' card file (7 of them);
+    --index 0..6 selects which. --index -1 (export) does the whole 7-up set."""
     from core import memcard as M
     from PIL import Image
-    if args.pix_off is None:
-        args.pix_off = M.EMBLEM_PIX_OFF
     card = M.read_card(args.card or DEFAULT_CARD)
     if args.action == "list":
         print(f"{Path(args.card or DEFAULT_CARD).name}: {len(card.saves)} save(s)")
         for s in card.saves:
-            tag = "AC1" if s.is_ac1 else "   "
-            blank = ""
-            if s.is_ac1:
-                blank = " (emblem: blank)" if M.is_emblem_blank(card.block_bytes(s.slot)) else " (emblem: drawn)"
-            print(f"  [{tag}] slot{s.slot} {s.code:14s} {s.label}{blank}")
+            tag = "EMB" if s.is_emblem else ("AC1" if s.is_ac1 else "   ")
+            note = ""
+            if s.is_emblem:
+                fb = card.file_bytes(s)
+                drawn = [i for i in range(M.EMBLEM_COUNT) if not M.is_emblem_blank(fb, i)]
+                note = f"  ({len(drawn)}/{M.EMBLEM_COUNT} emblems drawn: {drawn})"
+            print(f"  [{tag}] slot{s.slot} {s.code:14s} {s.label}{note}")
         return
-    # actions below need an AC1 save
-    sv = next((s for s in card.saves if s.is_ac1 and (args.slot is None or s.slot == args.slot)), None)
-    if not sv:
-        sys.exit("no AC1 save found on card")
-    blk = card.block_bytes(sv.slot)
     if args.action == "icon":
+        sv = next((s for s in card.saves if s.is_ac1 and not s.is_emblem
+                   and (args.slot is None or s.slot == args.slot)), None)
+        if not sv:
+            sys.exit("no AC1 save found on card")
         w, h, rgba = card.icon_rgba(sv)
         out = args.out or "/tmp/ac1_save_icon.png"
         Image.frombytes("RGBA", (w, h), rgba).resize((128, 128), Image.NEAREST).save(out)
         print("wrote", out)
-    elif args.action == "emblem-export":
-        w, h, rgba = M.decode_emblem(blk, args.pix_off)
-        out = args.out or "/tmp/ac1_emblem.png"
-        Image.frombytes("RGBA", (w, h), rgba).resize((256, 256), Image.NEAREST).save(out)
-        print(f"wrote {out}  (blank={M.is_emblem_blank(blk, args.pix_off)})")
+        return
+    # emblem actions need the EMBLEM DATA file
+    sv = card.emblem_file()
+    if not sv:
+        sys.exit("no 'ARMORED CORE EMBLEM DATA' file on this card")
+    fb = card.file_bytes(sv)
+    if args.action == "emblem-export":
+        if args.index < 0:                       # whole 7-up set
+            out = args.out or "/tmp/ac1_emblems.png"
+            sheet = Image.new("RGB", (M.EMBLEM_W * M.EMBLEM_COUNT, M.EMBLEM_H))
+            for i in range(M.EMBLEM_COUNT):
+                w, h, rgba = M.decode_emblem(fb, i)
+                sheet.paste(Image.frombytes("RGBA", (w, h), rgba).convert("RGB"),
+                            (i * M.EMBLEM_W, 0))
+            sheet.resize((sheet.width * 4, sheet.height * 4), Image.NEAREST).save(out)
+            print(f"wrote {out}  (7 emblems)")
+        else:
+            w, h, rgba = M.decode_emblem(fb, args.index)
+            out = args.out or f"/tmp/ac1_emblem{args.index}.png"
+            Image.frombytes("RGBA", (w, h), rgba).resize((256, 256), Image.NEAREST).save(out)
+            print(f"wrote {out}  (emblem {args.index}, blank={M.is_emblem_blank(fb, args.index)})")
     elif args.action == "emblem-import":
         if not args.image:
             sys.exit("emblem-import needs --image PATH")
-        data = M.encode_emblem(args.image, blk)
-        card.patch(sv.slot, args.pix_off, data)
+        if args.index < 0:
+            sys.exit("emblem-import needs --index 0..6")
+        card.write_file_bytes(sv, M.write_emblem(fb, args.index, args.image))
         card.save(args.out)         # writes back to card (or --out copy)
-        print(f"imported {args.image} -> emblem of slot{sv.slot} "
+        print(f"imported {args.image} -> emblem {args.index} with its own custom palette "
               f"({'in place' if not args.out else args.out})")
+
+
+def cmd_emblem_write_mcs(proj, idx, args):
+    """Patch one emblem in an exported single-save .mcs (for re-import into a
+    LIVE DuckStation card via import_memory_card_save)."""
+    from core import memcard as M
+    if args.index < 0:
+        sys.exit("--index 0..6 required")
+    out = M.patch_mcs_emblem(args.mcs, args.index, args.image, args.out)
+    print(f"patched emblem {args.index} <- {args.image}  ->  {out}")
 
 
 def main():
@@ -317,9 +347,15 @@ def main():
     p.add_argument("--card", help="path to .mcd/.mcr card (default: DuckStation AC1 card)")
     p.add_argument("--slot", type=int, help="directory slot (default: first AC1 save)")
     p.add_argument("--image", help="GIF/PNG to import (emblem-import)")
-    p.add_argument("--pix-off", type=lambda s: int(s, 0), default=None,
-                   help="emblem pixel offset override (DuckStation-confirmed)")
+    p.add_argument("--index", type=int, default=-1,
+                   help="emblem 0..6 in the EMBLEM DATA file; -1 = whole 7-up set (export)")
     p.add_argument("-o", "--out", help="output file / write card copy here instead of in place")
+    p = sub.add_parser("emblem-write-mcs",
+                       help="patch one emblem in an exported .mcs (for re-import to a live card)")
+    p.add_argument("--mcs", required=True, help="exported EMBLEM DATA save (.mcs)")
+    p.add_argument("--index", type=int, default=-1, help="emblem 0..6")
+    p.add_argument("--image", required=True, help="GIF/PNG from your PC")
+    p.add_argument("-o", "--out", help="output .mcs (default: in place)")
     p = sub.add_parser("missions", help="batch-render every mission's populated scene")
     p.add_argument("--out-dir"); p.add_argument("--first", type=int, default=0)
     p.add_argument("--last", type=int, default=49)
@@ -335,6 +371,9 @@ def main():
     p.add_argument("--no-ceiling", action="store_true",
                    help="drop ceiling faces (see into indoor levels)")
     p.add_argument("--spawns", action="store_true", help="overlay spawn markers")
+    p.add_argument("--materials", action="store_true",
+                   help="colour faces by decoded texture material (tpage/clut) + real "
+                        "flat RGB, instead of by floor/wall/ceiling class")
     p.add_argument("--obj", help="also export OBJ (o floor/ceiling/wall groups)")
     p.add_argument("--yaw", type=float, default=30); p.add_argument("--pitch", type=float, default=55)
     p.add_argument("--zoom", type=float, default=1.0)
@@ -365,7 +404,8 @@ def main():
     {"list": cmd_list, "notes": cmd_notes, "info": cmd_info, "note": cmd_note,
      "obj": cmd_obj, "render": cmd_render, "missions": cmd_missions,
      "level": cmd_level,
-     "mistim": cmd_mistim, "memcard": cmd_memcard}[args.cmd](proj, idx, args)
+     "mistim": cmd_mistim, "memcard": cmd_memcard,
+     "emblem-write-mcs": cmd_emblem_write_mcs}[args.cmd](proj, idx, args)
 
 
 if __name__ == "__main__":
