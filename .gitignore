@@ -44,3 +44,6 @@ jpsxdec/
 # compiled hot-loop libs (machine-specific; rebuilt on demand)
 core/libraster.so
 core/libxa.so
+
+# memory-card saves (per-project, not part of the tool)
+*.mcd
