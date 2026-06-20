@@ -368,7 +368,7 @@ class IndexPanel(QWidget):
         self.tree.setColumnCount(6)
         self.tree.setHeaderLabels(["", "#", "name", "type", "sectors", "size [bytes]"])
         self.tree.header().setDefaultSectionSize(80)
-        self.tree.setColumnWidth(0, 48)   # checkbox / arrow col
+        self.tree.setColumnWidth(0, 72)   # checkbox / arrow col
         self.tree.setColumnWidth(1, 60)   # entry number
         self.tree.setColumnWidth(2, 170)  # name
         self.tree.setColumnWidth(3, 110)  # type
