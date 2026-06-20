@@ -39,3 +39,22 @@ def mission_entry(bin_path, n, odd=True, index_path=None):
     ents = fdat_entries(bin_path, index_path)
     idx = 2 * n + (1 if odd else 0)
     return ents[idx] if idx < len(ents) else b""
+
+
+def fdat_child_info(bin_path, index_path=None):
+    """List FDAT.T's entries for tree expansion: [(index, size_bytes, role)].
+
+    Mission N occupies entries 2N (objective code) and 2N+1 (chunk stream); a
+    zero-length slice is an unused slot.
+    """
+    out = []
+    for i, ent in enumerate(fdat_entries(bin_path, index_path)):
+        m = i // 2
+        if not ent:
+            role = "empty"
+        elif i % 2 == 0:
+            role = f"mission {m} objective"
+        else:
+            role = f"mission {m} chunk-stream"
+        out.append((i, len(ent), role))
+    return out

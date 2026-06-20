@@ -12,7 +12,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QAbstractItemView, QPlainTextEdit, QSpinBox, QStackedWidget,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QColor, QFont, QBrush, QPainter, QPen, QIcon
+from PyQt6.QtGui import (
+    QPixmap, QImage, QColor, QFont, QFontDatabase, QBrush, QPainter, QPen, QIcon,
+)
 from PyQt6.QtWidgets import QComboBox, QCheckBox
 
 from core.jpsxdec import (
@@ -111,22 +113,61 @@ TYPE_COLORS = {
     "Audio": "#BA7517",
     "Video": "#1a73e8",
     "File":  "#555555",
+    "Container File": "#7A5FB0",
 }
+
+# Byte → printable-ASCII translation for hex dumps ('.' for non-printables),
+# applied with the C-level bytes.translate() instead of a per-byte Python loop.
+_HEX_ASCII_TABLE = bytes((b if 32 <= b < 127 else 0x2E) for b in range(256))
+
+
+def _mono_font(point_size: int) -> QFont:
+    """A guaranteed fixed-pitch font for hex/byte views. 'Courier New' is often
+    absent on Linux and silently substituted with a proportional face (mangling
+    column alignment); the system FixedFont is always monospaced."""
+    f = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    f.setPointSize(point_size)
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setFixedPitch(True)
+    return f
+
+
+# Decoded-pixmap LRU cache. Re-selecting an already-viewed TIM then costs a
+# dict lookup instead of a full decode (~17 ms) + scale. Keyed by path + mtime
+# (so a replaced/rebuilt TIM invalidates) + palette + size. A 200px RGBA pixmap
+# is ~160 KB, so the 192-entry cap bounds this at ~30 MB.
+from collections import OrderedDict as _OrderedDict
+_TIM_PIXMAP_CACHE: "_OrderedDict[tuple, QPixmap]" = _OrderedDict()
+_TIM_PIXMAP_CACHE_MAX = 192
 
 
 def _tim_to_pixmap(tim_path: Path, palette_index: int = 0, max_size: int = 200) -> QPixmap | None:
+    try:
+        mtime = tim_path.stat().st_mtime_ns
+    except OSError:
+        return None
+    key = (str(tim_path), mtime, palette_index, max_size)
+    cached = _TIM_PIXMAP_CACHE.get(key)
+    if cached is not None:
+        _TIM_PIXMAP_CACHE.move_to_end(key)
+        return cached
+
     result = decode_tim_to_rgba(tim_path, palette_index)
     if result is None:
         return None
     w, h, rgba = result
     img = QImage(rgba, w, h, w * 4, QImage.Format.Format_RGBA8888)
-    pix = QPixmap.fromImage(img)
+    pix = QPixmap.fromImage(img)   # copies pixels — safe to drop rgba after this
     if max_size:
         pix = pix.scaled(
             max_size, max_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
+    _TIM_PIXMAP_CACHE[key] = pix
+    _TIM_PIXMAP_CACHE.move_to_end(key)
+    while len(_TIM_PIXMAP_CACHE) > _TIM_PIXMAP_CACHE_MAX:
+        _TIM_PIXMAP_CACHE.popitem(last=False)
     return pix
 
 
@@ -224,12 +265,56 @@ def _entry_is_text(entry: IndexEntry) -> bool:
 
 
 def _entry_is_hex(entry: IndexEntry) -> bool:
+    if getattr(entry, 'container_index', None) is not None:
+        return True
     if entry.entry_type != 'File':
         return False
     for s in (entry.full_id, entry.name):
         if s and s.upper().endswith('.T'):
             return True
     return False
+
+
+def _expand_containers(entries: list[IndexEntry], bin_path, index_path) -> list[IndexEntry]:
+    """Insert synthetic children under FDAT.T so it expands in the tree.
+
+    jPSXdec sees FDAT.T as one 27 MB opaque File; we split it with the same
+    count-first reader the mission code uses (cached, so the read happens once)
+    and add one child per entry. Children carry container_index so a click reads
+    an in-memory slice instead of the whole file.
+    """
+    if not bin_path:
+        return entries
+    parent = next(
+        (e for e in entries
+         if (e.full_id or e.name or '').upper().endswith('FDAT.T')
+         and e.container_index is None),
+        None,
+    )
+    if parent is None:
+        return entries
+    try:
+        from core.fdat import fdat_child_info
+        info = fdat_child_info(bin_path, index_path)
+    except Exception:
+        return entries
+    children = [
+        IndexEntry(
+            number=parent.number,
+            name=f"{parent.name}[{i}]",
+            full_id=f"{parent.full_id}[{i}]",
+            entry_type="File",
+            sector_start=parent.sector_start,
+            sector_end=parent.sector_end,
+            details=f"{role} · {size:,} B",
+            parent_name=parent.name,
+            container_index=i,
+        )
+        for i, size, role in info
+        if size  # skip empty slots — container_index is preserved, so this is cosmetic
+    ]
+    pos = entries.index(parent) + 1
+    return entries[:pos] + children + entries[pos:]
 
 
 def extract_tim_for_entry(index_path: Path, entry: IndexEntry, out_dir: Path) -> Path | None:
@@ -367,11 +452,16 @@ class IndexPanel(QWidget):
 
         for entry in entries:
             is_folder = (not entry.parent_name) and (entry.name in folder_names)
+            is_synthetic = entry.container_index is not None
             item = QTreeWidgetItem()
 
             if is_folder:
                 item.setFlags(folder_flags)
                 item.setText(0, "▶")
+            elif is_synthetic:
+                # Container slices aren't independently extractable via jPSXdec,
+                # so they're selectable for inspection but carry no checkbox.
+                item.setFlags(folder_flags)
             else:
                 item.setFlags(leaf_flags)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -382,7 +472,10 @@ class IndexPanel(QWidget):
             color = TYPE_COLORS.get(entry.entry_type, "#555")
             item.setForeground(2, QColor(color))
 
-            if entry.is_image and entry.width:
+            if is_synthetic:
+                item.setText(3, entry.details)
+                item.setForeground(3, QColor(color))
+            elif entry.is_image and entry.width:
                 item.setText(3, f"{entry.entry_type} {entry.width}×{entry.height}")
                 item.setForeground(3, QColor(color))
             else:
@@ -604,37 +697,50 @@ class PaletteStrip(QWidget):
         self.label.setStyleSheet("font-size:10px; color:#6B8AA0;")
         layout.addWidget(self.label)
 
-        self.swatch_area = QWidget()
-        self.swatch_layout = QGridLayout(self.swatch_area)
-        self.swatch_layout.setContentsMargins(0, 0, 0, 0)
-        self.swatch_layout.setSpacing(2)
-        layout.addWidget(self.swatch_area)
+        # Whole CLUT is painted into ONE pixmap rather than one QWidget per
+        # colour. 256 styled QLabels per selection was the dominant click cost
+        # (Qt parses CSS + lays out + paints each one); a single pixmap drops
+        # that to one paint and uses less memory. No fixed colour count is
+        # assumed — the grid is sized from the actual CLUT length.
+        self.swatch_label = QLabel()
+        self.swatch_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.swatch_label)
         layout.addStretch()
 
+    _CELL = 13      # swatch size in px
+    _GAP = 2        # spacing between swatches
+    _COLS = 16      # swatches per row
+    # Display safety cap: a multi-palette CLUT can hold thousands of entries;
+    # bound the painted grid so the pixmap stays small. The label still reports
+    # the true entry count regardless of this cap.
+    _DISPLAY_MAX = 256
+
     def set_colors(self, colors: list[tuple[int, int, int]], count_label: str = ""):
-        while self.swatch_layout.count():
-            w = self.swatch_layout.takeAt(0).widget()
-            if w:
-                w.deleteLater()
         self.label.setText(f"{self._base_label} ({count_label})")
-        cols = 16
-        for i, (r, g, b) in enumerate(colors[:256]):
+        shown = colors[:self._DISPLAY_MAX]
+        n = len(shown)
+        if n == 0:
+            self.swatch_label.clear()
+            return
+        cell, gap, cols = self._CELL, self._GAP, self._COLS
+        rows = (n + cols - 1) // cols
+        w = cols * cell + (cols - 1) * gap
+        h = rows * cell + (rows - 1) * gap
+        img = QImage(w, h, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        p = QPainter(img)
+        for i, (r, g, b) in enumerate(shown):
             # BGR555 pure black (0x0000) = transparent / unused slot — show as pink
             if r == 0 and g == 0 and b == 0:
                 r, g, b = 220, 20, 120
-            swatch = QLabel()
-            swatch.setFixedSize(13, 13)
-            swatch.setStyleSheet(
-                f"background: rgb({r},{g},{b});"
-                f"border: 0.5px solid rgba(0,0,0,0.15); border-radius:2px;"
-            )
-            self.swatch_layout.addWidget(swatch, i // cols, i % cols)
+            x = (i % cols) * (cell + gap)
+            y = (i // cols) * (cell + gap)
+            p.fillRect(x, y, cell, cell, QColor(r, g, b))
+        p.end()
+        self.swatch_label.setPixmap(QPixmap.fromImage(img))
 
     def clear(self):
-        while self.swatch_layout.count():
-            w = self.swatch_layout.takeAt(0).widget()
-            if w:
-                w.deleteLater()
+        self.swatch_label.clear()
         self.label.setText(f"{self._base_label} — no file loaded")
 
 
@@ -657,15 +763,29 @@ class TextViewWidget(QWidget):
 
         self._text_edit = QPlainTextEdit()
         self._text_edit.setReadOnly(True)
-        self._text_edit.setFont(QFont("Courier New", 10))
+        self._text_edit.setFont(_mono_font(10))
         self._text_edit.setStyleSheet(
             "QPlainTextEdit { background:#1E2E3C; color:#ECEFF1; border:none; }"
         )
         layout.addWidget(self._text_edit)
 
+    # Cap how much we render so a large file can't freeze the UI thread
+    # (see HexViewWidget._RENDER_CAP). Only small text files normally reach
+    # this view, but this is defence-in-depth against a mis-typed large entry.
+    _RENDER_CAP = 256 * 1024
+
+    def _set_text(self, data: bytes):
+        total = len(data)
+        view = data[:self._RENDER_CAP]
+        text = view.decode('latin-1')
+        if total > self._RENDER_CAP:
+            text += (f"\n\n… showing first {len(view):,} of {total:,} bytes "
+                     f"({total / 1024 / 1024:.1f} MB) — truncated for display")
+        self._text_edit.setPlainText(text)
+
     def show_bytes(self, data: bytes, name: str):
         self.header.setText(f"text — {name}")
-        self._text_edit.setPlainText(data.decode('latin-1'))
+        self._set_text(data)
 
     def show_file(self, path: Path | None, name: str, full_id: str = ""):
         self.header.setText(f"text — {name}")
@@ -673,7 +793,7 @@ class TextViewWidget(QWidget):
             self._text_edit.setPlainText(f"[file not found: {full_id or name}]")
             return
         try:
-            self._text_edit.setPlainText(path.read_bytes().decode('latin-1'))
+            self._set_text(path.read_bytes())
         except Exception as e:
             self._text_edit.setPlainText(f"[read error: {e}]")
 
@@ -715,18 +835,21 @@ class HexViewWidget(QWidget):
 
         self._hex_edit = QPlainTextEdit()
         self._hex_edit.setReadOnly(True)
-        self._hex_edit.setFont(QFont("Courier New", 9))
+        self._hex_edit.setFont(_mono_font(9))
+        self._hex_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._hex_edit.setStyleSheet(
             "QPlainTextEdit { background:#1E2E3C; color:#ECEFF1; border:none; }"
         )
         layout.addWidget(self._hex_edit)
 
         self._data: bytes = b''
+        self._total: int = 0          # true size; _data may be a capped prefix
         self._cols_spin.valueChanged.connect(self._refresh)
 
-    def show_bytes(self, data: bytes, name: str):
+    def show_bytes(self, data: bytes, name: str, total: int | None = None):
         self.header.setText(f"hex — {name}")
         self._data = data
+        self._total = total if total is not None else len(data)
         self._refresh()
 
     def show_file(self, path: Path | None, name: str, full_id: str = ""):
@@ -734,24 +857,45 @@ class HexViewWidget(QWidget):
         if path is None or not path.exists():
             self._hex_edit.setPlainText(f"[file not found: {full_id or name}]")
             self._data = b''
+            self._total = 0
             return
         try:
             self._data = path.read_bytes()
         except Exception as e:
             self._hex_edit.setPlainText(f"[read error: {e}]")
             self._data = b''
+            self._total = 0
             return
+        self._total = len(self._data)
         self._refresh()
+
+    # Cap how much we format/render at once. Files like FDAT.T (27 MB) or
+    # RTIM.T (17 MB) would otherwise take ~30-50s to format and freeze the UI
+    # ("python3 not responding"). 256 KB is plenty for header inspection and
+    # renders instantly.
+    _RENDER_CAP = 256 * 1024
 
     def _refresh(self):
         cols = self._cols_spin.value()
         data = self._data
+        # _total is the real size; _data may already be a capped prefix from the
+        # caller, so cap against both and report the true total in the notice.
+        total = self._total
+        view = data[:self._RENDER_CAP]
+        capped = total > len(view)
+        # C-level hex (bytes.hex) + ascii (bytes.translate) instead of per-byte
+        # Python loops — ~6x faster to format a full capped page.
+        table = _HEX_ASCII_TABLE
+        width = cols * 3 - 1
         lines = []
-        for i in range(0, len(data), cols):
-            chunk = data[i:i + cols]
-            hex_part = ' '.join(f'{b:02X}' for b in chunk).ljust(cols * 3 - 1)
-            ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-            lines.append(f"{i:08X}  {hex_part}  {ascii_part}")
+        for i in range(0, len(view), cols):
+            chunk = view[i:i + cols]
+            lines.append(f"{i:08X}  {chunk.hex(' ').upper():<{width}}  "
+                         f"{chunk.translate(table).decode('latin-1')}")
+        if capped:
+            lines.append('')
+            lines.append(f"… showing first {len(view):,} of {total:,} bytes "
+                         f"({total / 1024 / 1024:.1f} MB) — truncated for display")
         self._hex_edit.setPlainText('\n'.join(lines))
 
 
@@ -1652,10 +1796,23 @@ class DetailPanel(QWidget):
                     return p
         return None
 
-    def _load_entry_bytes(self, entry: IndexEntry) -> bytes | None:
+    def _load_entry_bytes(self, entry: IndexEntry, max_bytes: int | None = None) -> bytes | None:
+        # Synthetic container child: read an in-memory slice of the cached
+        # container (instant after the one-time parse) rather than a file.
+        if entry.container_index is not None and self._bin_path:
+            try:
+                from core.fdat import fdat_entries
+                ents = fdat_entries(self._bin_path, self._index_path)
+                if entry.container_index < len(ents):
+                    return ents[entry.container_index]
+            except Exception:
+                pass
         path = self._resolve_entry_file(entry)
         if path is not None:
             try:
+                if max_bytes is not None:
+                    with open(path, "rb") as f:
+                        return f.read(max_bytes)
                 return path.read_bytes()
             except Exception:
                 pass
@@ -1665,8 +1822,27 @@ class DetailPanel(QWidget):
                 size = int(entry.details)
             except (TypeError, ValueError):
                 pass
-            return _read_bin_sectors(self._bin_path, entry.sector_start, entry.sector_end, size)
+            data = _read_bin_sectors(self._bin_path, entry.sector_start, entry.sector_end, size)
+            if data is not None and max_bytes is not None:
+                return data[:max_bytes]
+            return data
         return None
+
+    def _entry_total_size(self, entry: IndexEntry, fallback: int) -> int:
+        """Real byte size of an entry (so a capped hex read still reports the
+        true total). fallback is used when the size can't be determined."""
+        if entry.container_index is not None:
+            return fallback           # slices are returned whole
+        path = self._resolve_entry_file(entry)
+        if path is not None:
+            try:
+                return path.stat().st_size
+            except OSError:
+                pass
+        try:
+            return int(entry.details)
+        except (TypeError, ValueError):
+            return fallback
 
     def show_text_entry(self, entry: IndexEntry):
         self._stop_audio()
@@ -1681,9 +1857,14 @@ class DetailPanel(QWidget):
     def show_hex_entry(self, entry: IndexEntry):
         self._stop_audio()
         self._current_entry = entry
-        data = self._load_entry_bytes(entry)
+        # The hex view only formats the first _RENDER_CAP bytes, so for big
+        # containers (FDAT.T/RTIM.T ≈ 17-27 MB) read just that much instead of
+        # blocking the UI on a full multi-MB read every click.
+        cap = HexViewWidget._RENDER_CAP
+        data = self._load_entry_bytes(entry, max_bytes=cap)
         if data is not None:
-            self._hex_view.show_bytes(data, entry.name)
+            total = self._entry_total_size(entry, len(data))
+            self._hex_view.show_bytes(data, entry.name, total=total)
         else:
             self._hex_view.show_file(None, entry.name, entry.full_id or '')
         self._stack.setCurrentIndex(2)
@@ -2417,6 +2598,7 @@ class MainWindow(QMainWindow):
                     wav_list = sorted(set(wav_list), key=lambda p: str(p))
                     entry.wav_paths = wav_list
                     entry.wav_path  = wav_list[0] if wav_list else None
+            entries = _expand_containers(entries, bin_path, idx)
             self.entries = entries
             NEW_FILES_DIR.mkdir(parents=True, exist_ok=True)
             NEW_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -2480,6 +2662,7 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Error during indexing.")
             return
 
+        entries = _expand_containers(entries, self.project.bin_path, self.project.index_path)
         self.entries = entries
         NEW_FILES_DIR.mkdir(parents=True, exist_ok=True)
         NEW_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
