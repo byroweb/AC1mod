@@ -129,6 +129,11 @@ class IndexEntry:
     details: str           # raw details string
     parent_name: Optional[str] = None
 
+    # Byte size as reported by jPSXdec's index (File items) or computed for
+    # synthetic container children. None when jPSXdec gives no size (Tim/XA/Video,
+    # which it describes by dimensions/duration instead).
+    size_bytes: Optional[int] = None
+
     # Set on synthetic children of a custom .T container (e.g. FDAT.T) so they
     # are read as an in-memory slice of the cached container instead of a file.
     container_index: Optional[int] = None
@@ -242,6 +247,7 @@ def parse_index_file(index_path: Path) -> list[IndexEntry]:
 
             # Build a details string for display
             details = fields.get("Size", "")
+            size_bytes = int(details) if details.isdigit() else None
 
             # Determine parent — child items have bracketed suffix like [0] or [0.0]
             # Use base name (strip bracket suffix) so parent lookup is robust
@@ -262,6 +268,7 @@ def parse_index_file(index_path: Path) -> list[IndexEntry]:
                 sector_end=sector_end,
                 details=details,
                 parent_name=parent,
+                size_bytes=size_bytes,
             )
 
             # Parse image dimensions for TIM entries

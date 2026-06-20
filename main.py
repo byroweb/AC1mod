@@ -306,9 +306,10 @@ def _expand_containers(entries: list[IndexEntry], bin_path, index_path) -> list[
             entry_type="File",
             sector_start=parent.sector_start,
             sector_end=parent.sector_end,
-            details=f"{role} · {size:,} B",
+            details=role,
             parent_name=parent.name,
             container_index=i,
+            size_bytes=size,
         )
         for i, size, role in info
         if size  # skip empty slots — container_index is preserved, so this is cosmetic
@@ -364,13 +365,15 @@ class IndexPanel(QWidget):
         layout.addWidget(self.header_label)
 
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(4)
-        self.tree.setHeaderLabels(["", "#", "name", "type / size"])
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(["", "#", "name", "type", "sectors", "size [bytes]"])
         self.tree.header().setDefaultSectionSize(80)
         self.tree.setColumnWidth(0, 48)   # checkbox / arrow col
-        self.tree.setColumnWidth(1, 88)   # entry number
-        self.tree.setColumnWidth(2, 180)  # name
-        self.tree.setColumnWidth(3, 90)   # type/size
+        self.tree.setColumnWidth(1, 60)   # entry number
+        self.tree.setColumnWidth(2, 170)  # name
+        self.tree.setColumnWidth(3, 110)  # type
+        self.tree.setColumnWidth(4, 110)  # sectors (start-end)
+        self.tree.setColumnWidth(5, 115)  # size in bytes
         self.tree.setIndentation(14)
         self.tree.setAnimated(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -472,15 +475,27 @@ class IndexPanel(QWidget):
             color = TYPE_COLORS.get(entry.entry_type, "#555")
             item.setForeground(2, QColor(color))
 
+            # col 3: type (synthetic children show their role; images add dims)
             if is_synthetic:
                 item.setText(3, entry.details)
-                item.setForeground(3, QColor(color))
             elif entry.is_image and entry.width:
                 item.setText(3, f"{entry.entry_type} {entry.width}×{entry.height}")
-                item.setForeground(3, QColor(color))
             else:
                 item.setText(3, entry.entry_type)
-                item.setForeground(3, QColor(color))
+            item.setForeground(3, QColor(color))
+
+            # col 4: sector range (blank for synthetic slices — they share the
+            # parent's sectors, so repeating it would be misleading)
+            if not is_synthetic and (entry.sector_start or entry.sector_end):
+                count = entry.sector_end - entry.sector_start + 1
+                item.setText(4, f"{entry.sector_start}-{entry.sector_end}")
+                item.setToolTip(4, f"{count:,} sectors")
+
+            # col 5: size in bytes (right-aligned), where jPSXdec reports one
+            if entry.size_bytes is not None:
+                item.setText(5, f"{entry.size_bytes:,}")
+                item.setTextAlignment(5, Qt.AlignmentFlag.AlignRight
+                                      | Qt.AlignmentFlag.AlignVCenter)
 
             self._item_to_entry[id(item)] = entry
 
@@ -1817,11 +1832,7 @@ class DetailPanel(QWidget):
             except Exception:
                 pass
         if self._bin_path:
-            size = 0
-            try:
-                size = int(entry.details)
-            except (TypeError, ValueError):
-                pass
+            size = entry.size_bytes or 0
             data = _read_bin_sectors(self._bin_path, entry.sector_start, entry.sector_end, size)
             if data is not None and max_bytes is not None:
                 return data[:max_bytes]
@@ -1839,10 +1850,9 @@ class DetailPanel(QWidget):
                 return path.stat().st_size
             except OSError:
                 pass
-        try:
-            return int(entry.details)
-        except (TypeError, ValueError):
-            return fallback
+        if entry.size_bytes is not None:
+            return entry.size_bytes
+        return fallback
 
     def show_text_entry(self, entry: IndexEntry):
         self._stop_audio()
