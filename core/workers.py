@@ -239,16 +239,51 @@ class BuildWorker(QThread):
 
 
 class AudioExtractWorker(QThread):
-    """Extract a single audio entry's WAV on demand (lazy loading)."""
+    """Extract a single audio entry's WAV on demand (lazy loading).
+
+    Decodes XA-ADPCM in-process (core.xa, numpy + C) when the BIN and stream
+    metadata are available — a few-ms decode with no JVM. Falls back to jPSXdec
+    if that path is unavailable or fails.
+    """
     finished = pyqtSignal(object, bool, str)  # entry, ok, message
 
-    def __init__(self, index_path: Path, entry, out_dir: Path):
+    def __init__(self, index_path: Path, entry, out_dir: Path, bin_path: Path = None):
         super().__init__()
         self.index_path = index_path
         self.entry = entry
         self.out_dir = Path(out_dir).resolve()
+        self.bin_path = Path(bin_path) if bin_path else None
+
+    def _try_xa_decode(self) -> bool:
+        """Decode this XA stream straight from the BIN. Returns True on success."""
+        e = self.entry
+        if not (self.bin_path and self.bin_path.exists()):
+            return False
+        if not (e.sector_start or e.sector_end):
+            return False
+        try:
+            from core.xa import decode_xa_to_wav
+            dest = self.out_dir / ((e.full_id or e.name) + ".wav")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            out = decode_xa_to_wav(
+                self.bin_path, e.sector_start, e.sector_end, dest,
+                channel=e.audio_xa_channel or 0,
+                stereo=(e.audio_channels or 2) == 2,
+                sample_rate=e.audio_sample_rate or 37800,
+            )
+            if out and dest.exists():
+                e.wav_path = dest
+                e.wav_paths = [dest]
+                return True
+        except Exception as ex:
+            log.warning("xa in-process decode failed for #%s (%s); using jPSXdec",
+                        e.number, ex)
+        return False
 
     def run(self):
+        if self._try_xa_decode():
+            self.finished.emit(self.entry, True, "xa")
+            return
         ok, msg = extract_audio_for_item(self.index_path, self.entry.number, self.out_dir)
         if ok:
             # Scan for the newly created WAV and attach it to the entry

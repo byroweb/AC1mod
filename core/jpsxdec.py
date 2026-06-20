@@ -136,6 +136,7 @@ class IndexEntry:
     # Parsed audio fields (only for Audio type)
     audio_sample_rate: Optional[int] = None
     audio_channels: Optional[int] = None
+    audio_xa_channel: Optional[int] = None   # CD subheader channel (XA interleave)
 
     # Paths set after extraction
     png_path: Optional[Path] = None
@@ -269,16 +270,23 @@ def parse_index_file(index_path: Path) -> list[IndexEntry]:
                 if pal.isdigit():
                     entry.palette_count = int(pal)
 
-            # Parse audio metadata where jPSXdec provides it
+            # Parse audio metadata where jPSXdec provides it. AC1's XA lines look
+            # like: |Channel:0|Stereo?:Yes|Samples/Sec:37800|Bits/Sample:4
             if entry_type == "Audio":
-                for key in ("SampleRate", "SamplesPerSecond", "Freq"):
+                for key in ("Samples/Sec", "SampleRate", "SamplesPerSecond", "Freq"):
                     if key in fields and fields[key].isdigit():
                         entry.audio_sample_rate = int(fields[key])
                         break
-                for key in ("Channels", "Ch"):
-                    if key in fields and fields[key].isdigit():
-                        entry.audio_channels = int(fields[key])
-                        break
+                if "Stereo?" in fields:
+                    entry.audio_channels = 2 if fields["Stereo?"].lower() == "yes" else 1
+                else:
+                    for key in ("Channels", "Ch"):
+                        if key in fields and fields[key].isdigit():
+                            entry.audio_channels = int(fields[key])
+                            break
+                # CD subheader channel number — which interleaved stream this is.
+                if "Channel" in fields and fields["Channel"].lstrip("-").isdigit():
+                    entry.audio_xa_channel = int(fields["Channel"])
 
             entries.append(entry)
 

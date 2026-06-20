@@ -131,8 +131,16 @@ def _tim_to_pixmap(tim_path: Path, palette_index: int = 0, max_size: int = 200) 
 
 
 def _wav_to_pixmap(wav_path: Path, w: int = 200, h: int = 80) -> QPixmap | None:
-    """Render a rough amplitude waveform from a WAV file."""
-    import wave as _wave, struct as _s
+    """Render a rough amplitude waveform from a WAV file.
+
+    The per-column peak scan is vectorised with numpy: a BGM track is ~5.6M
+    samples, and the old per-sample struct.unpack loop took ~2s on the UI thread
+    (a visible freeze on every audio click). numpy does the same max-abs-per-
+    column reduction in a few ms. Behaviour is unchanged — left channel only,
+    one peak per output column, trailing columns zero for short clips.
+    """
+    import wave as _wave
+    import numpy as np
     try:
         with _wave.open(str(wav_path), 'rb') as wf:
             ch = wf.getnchannels()
@@ -143,27 +151,24 @@ def _wav_to_pixmap(wav_path: Path, w: int = 200, h: int = 80) -> QPixmap | None:
         return None
 
     frame_size = ch * sw
-    total = len(raw) // frame_size
+    total = len(raw) // frame_size if frame_size else 0
     if total == 0:
         return None
 
     step = max(1, total // w)
-    peaks = []
-    for i in range(w):
-        start = i * step * frame_size
-        end = min(start + step * frame_size, len(raw))
-        block = raw[start:end]
-        if not block:
-            peaks.append(0.0)
-            continue
+    ncol = min(w, total // step)             # full buckets we can fill
+    peaks = np.zeros(w, dtype=np.float32)
+    if ncol > 0:
         if sw == 2:
-            vals = [abs(_s.unpack_from('<h', block, j)[0]) / 32768.0
-                    for j in range(0, len(block) - 1, 2 * ch)]
+            left = np.frombuffer(raw, dtype='<i2')[:total * ch][::ch]
+            block = np.abs(left[:ncol * step].astype(np.float32)).reshape(ncol, step)
+            peaks[:ncol] = block.max(axis=1) / 32768.0
         elif sw == 1:
-            vals = [abs(b - 128) / 128.0 for b in block[::ch]]
+            left = np.frombuffer(raw, dtype=np.uint8)[:total * ch][::ch]
+            block = np.abs(left[:ncol * step].astype(np.float32) - 128.0).reshape(ncol, step)
+            peaks[:ncol] = block.max(axis=1) / 128.0
         else:
-            vals = [0.5]
-        peaks.append(max(vals) if vals else 0.0)
+            peaks[:ncol] = 0.5
 
     img = QImage(w, h, QImage.Format.Format_RGB32)
     img.fill(QColor(28, 28, 28))
@@ -2504,12 +2509,16 @@ class MainWindow(QMainWindow):
         if self._audio_extract_worker and self._audio_extract_worker.isRunning():
             self._audio_extract_worker.finished.disconnect()
         idx = self.project.index_path
-        if not idx or not idx.exists():
+        bin_path = self.project.bin_path
+        # Need the BIN for in-process XA decode, or the index for the jPSXdec
+        # fallback — bail only if neither is available.
+        if not ((bin_path and Path(bin_path).exists()) or (idx and idx.exists())):
             return
-        self._audio_extract_worker = AudioExtractWorker(idx, entry, EXISTING_FILES_DIR)
+        self._audio_extract_worker = AudioExtractWorker(
+            idx, entry, EXISTING_FILES_DIR, bin_path=bin_path)
         self._audio_extract_worker.finished.connect(self._on_audio_extracted)
         self._audio_extract_worker.start()
-        self.status.showMessage(f"Extracting audio: {entry.name}…")
+        self.status.showMessage(f"Loading audio: {entry.name}…")
 
     def _on_audio_extracted(self, entry, ok, msg):
         current = self.index_panel.current_entry()
