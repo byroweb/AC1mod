@@ -1738,7 +1738,8 @@ class _RasterCanvas(QWidget):
         sc = 0.5 if self._lowres else 1.0
         rw, rh = max(int(w * sc), 8), max(int(h * sc), 8)
         V, VN, F, Fcol, Fid = self._arrays
-        img, idb = raster.render(V, VN, F, Fcol, Fid, rw, rh, self.yaw, self.pitch, self.zoom)
+        img, idb = raster.render(V, VN, F, Fcol, Fid, rw, rh, self.yaw, self.pitch,
+                                 self.zoom, cull=False)
         self._idbuf, self._idscale = idb, rw / w
         p.drawImage(self.rect(), img)
 

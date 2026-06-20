@@ -86,8 +86,13 @@ def _face_class(verts, face):
     m = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
     ny /= m
     if abs(ny) > HORIZ:
-        # PSX Y is DOWN: a walkable floor's front face points -Y (world up)
-        return "floor" if ny < 0 else "ceiling"
+        # PSX Y is DOWN (larger Y = lower in the world). A walkable FLOOR sits at the
+        # BOTTOM of a room (larger Y) and its winding normal points +Y here; the CEILING
+        # is up top (smaller Y) with the −Y normal. CORRECTED 2026-06-18 (was inverted —
+        # confirmed by mean-Y of classified faces: the old "floor" set was the higher one;
+        # the earlier "verified" note was wrong). The RE repo's assemble_levels.py still
+        # has the old swapped convention and should be flipped to match.
+        return "ceiling" if ny < 0 else "floor"
     return "wall"
 
 

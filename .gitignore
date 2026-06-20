@@ -40,3 +40,6 @@ jpsxdec/
 
 # Local Claude Code config
 .claude/
+
+# compiled hot-loop libs (machine-specific; rebuilt on demand)
+core/libraster.so

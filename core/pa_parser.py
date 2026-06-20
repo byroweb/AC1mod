@@ -40,11 +40,28 @@ def _textured(t: int) -> bool:
     return bool(t & 0x80) or t in (0x24, 0x2c, 0x34, 0x3c)
 
 
+def material_color(tpage: int, clut: int) -> tuple:
+    """Stable, distinct RGB for a (tpage,clut) texture material.
+
+    Real texels live in a per-stage VRAM bank (PA entry 0/1 — embedded but not yet
+    decoded; see AC_1_USA_RE/scratch/re/pa_textures.md §4). Until that bank is cracked
+    or a live VRAM dump is supplied, colour each textured face by its decoded material
+    id so distinct textures read as distinct flat colours (a "material map")."""
+    import colorsys
+    key = ((tpage & 0xffff) * 0x9E3779B1 ^ (clut & 0xffff) * 0x85EBCA77) & 0xffffffff
+    h = (key & 0xff) / 255.0
+    s = 0.45 + ((key >> 8) & 0x3f) / 63.0 * 0.35
+    v = 0.62 + ((key >> 14) & 0x3f) / 63.0 * 0.33
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
 @dataclass
 class Face:
     verts: tuple              # global indices into Mesh.vertices
     color: tuple = (170, 170, 170)
     textured: bool = False
+    mat: tuple = None         # (tpage, clut) for textured faces, else None
 
 
 @dataclass
@@ -98,7 +115,12 @@ def _parse_subobjects(block):
         o = tbl + i * 28
         if o + 28 > len(block):
             break
-        f0, vcnt, f8 = struct.unpack_from("<3I", block, o)
+        # descriptor: f0 = u32 @+0x00 (vtx pool offset), vcnt = u16 @+0x04,
+        # +0x06 = u16 param (nonzero on "articulated" variant blocks), f8 = u32 @+0x08.
+        # (Was wrongly read as <3I, which swallowed +0x06 and massively over-read vcnt.)
+        f0 = struct.unpack_from("<I", block, o)[0]
+        vcnt = struct.unpack_from("<H", block, o + 0x04)[0]
+        f8 = struct.unpack_from("<I", block, o + 0x08)[0]
         flags = struct.unpack_from("<H", block, o + 0x0e)[0]
         prim_off = struct.unpack_from("<I", block, o + 0x10)[0]
         prim_cnt_base = struct.unpack_from("<H", block, o + 0x14)[0]
@@ -134,11 +156,20 @@ def _read_prims(block, off, cnt):
             voff, nv, stride = info
             idx = [struct.unpack_from("<H", block, o + voff + stride * k)[0]
                    for k in range(nv) if o + voff + stride * k + 2 <= len(block)]
-            # flat types carry an RGB colour word right after the 4-byte header
+            # flat types carry an RGB colour word right after the 4-byte header;
+            # textured types carry CLUT @rec+0x06 and TPAGE @rec+0x0a (PSX FT/GT
+            # packing) — see AC_1_USA_RE pa_textures.md §1.
             color = (170, 170, 170)
-            if not _textured(typ) and o + 7 <= len(block):
-                color = (block[o + 4], block[o + 5], block[o + 6])
-            out.append((typ, idx, color))
+            mat = None
+            if not _textured(typ):
+                if o + 7 <= len(block):
+                    color = (block[o + 4], block[o + 5], block[o + 6])
+            elif o + 0x0c <= len(block):
+                clut = struct.unpack_from("<H", block, o + 0x06)[0]
+                tpage = struct.unpack_from("<H", block, o + 0x0a)[0]
+                mat = (tpage, clut)
+                color = material_color(tpage, clut)
+            out.append((typ, idx, color, mat))
         o += reclen
         n += 1
     return out, o
@@ -155,18 +186,19 @@ def parse_block(block) -> Mesh:
         m.groups.append((f"sub{s['index']}", base, len(verts)))
         m.vertices.extend(verts)
         nv = len(verts)
-        for (typ, idx, color) in prims:
+        for (typ, idx, color, mat) in prims:
             idx = [i for i in idx if i < nv]
             if len(set(idx)) < 3:
                 continue
+            tx = _textured(typ)
             g = tuple(base + i for i in idx)
             if len(g) == 3:
-                m.faces.append(Face(g, color, _textured(typ)))
+                m.faces.append(Face(g, color, tx, mat))
             elif len(g) == 4:
                 # PSX 4-pt polys use Z/N vertex order (diagonal = v1-v2), so the
                 # two tris are (0,1,2) and (1,3,2) — NOT a (0,1,2)+(0,2,3) fan.
-                m.faces.append(Face((g[0], g[1], g[2]), color, _textured(typ)))
-                m.faces.append(Face((g[1], g[3], g[2]), color, _textured(typ)))
+                m.faces.append(Face((g[0], g[1], g[2]), color, tx, mat))
+                m.faces.append(Face((g[1], g[3], g[2]), color, tx, mat))
     return m
 
 

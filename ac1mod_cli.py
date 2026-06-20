@@ -194,7 +194,7 @@ def cmd_level(proj, idx, args):
         V, VN, F, Fcol, Fid = sc.to_arrays()
         img, _ = raster.render(V, VN, F, Fcol, Fid, args.w, args.h,
                                yaw=math.radians(args.yaw), pitch=math.radians(args.pitch),
-                               zoom=args.zoom)
+                               zoom=args.zoom, cull=False)
     else:
         from core.render import render_mesh
         img = render_mesh(mesh, args.w, args.h, yaw=math.radians(args.yaw),
@@ -230,7 +230,7 @@ def cmd_missions(proj, idx, args):
         V, VN, F, Fcol, Fid = sc.to_arrays()
         img, _ = raster.render(V, VN, F, Fcol, Fid, args.w, args.h,
                                yaw=math.radians(args.yaw), pitch=math.radians(args.pitch),
-                               zoom=args.zoom)
+                               zoom=args.zoom, cull=False)
         nm = names.get(n, "").replace("/", "-").strip()
         path = os.path.join(out_dir, f"mission_{n:02d}.png")
         img.save(path)
