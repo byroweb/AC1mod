@@ -42,6 +42,9 @@ INDEX_PATH = (APP_DIR / "jpsxdec.idx").resolve()
 
 # App-level (not game-specific): always stays in the app root.
 RECENT_PROJECT_FILE = (APP_DIR / "recent_project.txt").resolve()
+# Records whatever source was opened last — a saved project or a raw BIN — as a
+# "<kind>\t<path>" line so launch reopens the most recent one of either kind.
+RECENT_SOURCE_FILE = (APP_DIR / "recent_source.txt").resolve()
 
 
 def set_workspace(bin_path) -> Path:
@@ -2534,23 +2537,97 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { color:#7A9BB5; border-color:rgba(255,255,255,0.1); }"
         )
 
-    # ---- recent project helpers ----
+    # ---- source-switching helpers ----
+
+    def _set_bin_loaded_ui(self, bin_path: Path):
+        """Reflect a freshly opened BIN in the toolbar. The Open-BIN button stays
+        visible (relabelled) so a different game can be opened at any time."""
+        self.bin_label.setText(str(bin_path))
+        self.bin_label.show()
+        self.open_bin_btn.setText("Switch BIN…")
+        self.open_bin_btn.setToolTip("Open a different BIN — starts a fresh project")
+        self.setWindowTitle(f"AC1mod — {bin_path.name}")
+
+    def _confirm_discard_current(self) -> bool:
+        """Ask before throwing away the current project. Returns True to proceed."""
+        if not self.project.dirty:
+            return True
+        reply = QMessageBox.question(
+            self, "Discard current project?",
+            "The current project has unsaved changes.\n\n"
+            "Opening a different game starts a fresh project and discards them.\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    # ---- recent source helpers ----
+
+    def _save_recent_source(self, kind: str, path: Path):
+        """Record the last-opened source (kind = 'project' or 'bin') so the next
+        launch reopens whichever was touched most recently."""
+        try:
+            RECENT_SOURCE_FILE.write_text(f"{kind}\t{path}")
+        except Exception:
+            pass
 
     def _save_recent_project(self, path: Path):
+        # Kept for backward compatibility with the old single-purpose file.
         try:
             RECENT_PROJECT_FILE.write_text(str(path))
         except Exception:
             pass
+        self._save_recent_source("project", path)
+
+    def _save_recent_bin(self, path: Path):
+        self._save_recent_source("bin", path)
 
     def _auto_load_recent_project(self):
-        if not RECENT_PROJECT_FILE.exists():
+        kind, path = self._read_recent_source()
+        if path and path.exists():
+            if kind == "bin":
+                self._restore_recent_bin(path)
+            else:
+                self._load_project_from_path(path)
             return
+        # Fall back to the legacy recent-project file.
+        if RECENT_PROJECT_FILE.exists():
+            try:
+                legacy = Path(RECENT_PROJECT_FILE.read_text().strip())
+            except Exception:
+                return
+            if legacy.exists():
+                self._load_project_from_path(legacy)
+
+    def _read_recent_source(self):
+        """Return (kind, Path) from the recent-source file, or (None, None)."""
+        if not RECENT_SOURCE_FILE.exists():
+            return None, None
         try:
-            path = Path(RECENT_PROJECT_FILE.read_text().strip())
+            raw = RECENT_SOURCE_FILE.read_text().strip()
         except Exception:
-            return
-        if path.exists():
-            self._load_project_from_path(path)
+            return None, None
+        if "\t" in raw:
+            kind, _, p = raw.partition("\t")
+            return kind.strip(), Path(p.strip())
+        return "project", Path(raw)  # tolerate a bare path
+
+    def _restore_recent_bin(self, bin_path: Path):
+        """Reopen a remembered raw BIN at launch. If its workspace was already
+        indexed/extracted, load from that cache instead of re-running jPSXdec."""
+        set_workspace(bin_path)
+        if INDEX_PATH.exists() and EXISTING_FILES_DIR.exists():
+            self.project = Project()
+            self.project.bin_path = bin_path
+            self.project.index_path = INDEX_PATH
+            self.project.existing_files_dir = EXISTING_FILES_DIR
+            self.detail_panel.set_project(self.project)
+            self.detail_panel.set_bin_path(bin_path)
+            self._load_current_project_index()
+        else:
+            # No cache yet — fall back to a full index + extract.
+            self._open_bin_path(bin_path)
 
     def _load_project_from_path(self, path: Path):
         try:
@@ -2559,7 +2636,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load project:\n{e}")
             return
+        self._load_current_project_index()
 
+    def _load_current_project_index(self):
+        """Populate the UI from self.project's cached index + extracted files,
+        without re-running jPSXdec. Shared by project-open and recent-BIN restore."""
         idx = self.project.index_path
         ef  = self.project.existing_files_dir
         bin_path = self.project.bin_path
@@ -2571,10 +2652,7 @@ class MainWindow(QMainWindow):
             self.detail_panel.set_index_path(idx)
             if bin_path:
                 self.detail_panel.set_bin_path(Path(bin_path))
-                self.bin_label.setText(str(bin_path))
-                self.bin_label.show()
-                self.open_bin_btn.hide()
-                self.setWindowTitle(f"AC1mod — {bin_path.name}")
+                self._set_bin_loaded_ui(Path(bin_path))
             self.save_proj_btn.setEnabled(True)
             self.save_proj_btn.setToolTip("Save this project to a .ac1mod file")
             self.status.showMessage("Loading index from project…")
@@ -2643,23 +2721,40 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        bin_path = Path(path)
+        # Switching to a new game discards the current project's state, so warn
+        # if there are unsaved changes first.
+        if not self._confirm_discard_current():
+            return
+
+        self._open_bin_path(Path(path))
+
+    def _open_bin_path(self, bin_path: Path):
+        """Build a fresh project from a raw BIN and kick off indexing. Shared by
+        the toolbar button and the launch-time recent-source restore."""
+        if not JPSXDEC_JAR.exists():
+            return
+        self._save_recent_bin(bin_path)
         set_workspace(bin_path)          # repoint working dirs into APP_DIR/<bin name>/
+        # Start a fresh project — a different game has different sprite sheets,
+        # so the old project's replacements/annotations must not carry over.
+        self.project = Project()
+        self.detail_panel.set_project(self.project)
+        self.entries = []
         self.project.bin_path = bin_path
         self.project.index_path = INDEX_PATH
         self.project.existing_files_dir = EXISTING_FILES_DIR
 
-        # Show full path in toolbar
-        self.bin_label.setText(str(bin_path))
-        self.bin_label.show()
-        self.open_bin_btn.hide()
-        self.setWindowTitle(f"AC1mod — {bin_path.name}")
+        self._set_bin_loaded_ui(bin_path)
 
         self.detail_panel.set_index_path(INDEX_PATH)
         self.detail_panel.set_bin_path(bin_path)
         self.status.showMessage("Building index and extracting files…")
         self.detail_panel.clear()
         self.index_panel.tree.clear()
+        # New game, clean slate — disable actions until the new index is ready.
+        self.save_proj_btn.setEnabled(False)
+        self.build_btn.setEnabled(False)
+        self.extract_checked_btn.setEnabled(False)
 
         self._worker = IndexWorker(bin_path, INDEX_PATH, EXISTING_FILES_DIR)
         self._worker.progress.connect(self.status.showMessage)
@@ -2727,6 +2822,8 @@ class MainWindow(QMainWindow):
             self, "Open project", "", "AC1mod project (*.ac1mod);;All files (*)"
         )
         if not path:
+            return
+        if not self._confirm_discard_current():
             return
         self._load_project_from_path(Path(path))
         if self.project.project_path:
