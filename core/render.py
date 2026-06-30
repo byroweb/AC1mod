@@ -6,10 +6,11 @@ a single Mesh draws with the SAME correct per-pixel occlusion as the mission sce
 no painter's-algorithm depth spikes, no walls poking through floors. Wireframe mode
 keeps the lightweight QPainter line draw (a z-buffer adds nothing to wires).
 
-PS1 geometry is two-sided by default here: the game culls back-faces per-camera with
-NCLIP, but a static viewer can't reproduce that per winding, and culling on our side
-makes inconsistently-wound walls turn see-through. The z-buffer makes two-sided
-correct, so we render both sides and let depth sort it out.
+Two-sided by default for inspection (an external orbit camera sees walls from any
+side; AC1 interior walls are largely single faces, so two-sided keeps them solid from
+every angle). cull=True reproduces the game EXACTLY: the level emitter (0x80063BE8 in
+AC_1_USA_RE/scratch/re/_ovl202.dis) runs GTE NCLIP (0x80064628) per polygon and skips
+NCLIP<=0 (blez), recomputed per camera. raster's cull keeps area>0 = that same side.
 """
 from __future__ import annotations
 import math
@@ -33,7 +34,8 @@ def render_mesh(mesh, w=520, h=380, yaw=0.6, pitch=0.5, zoom=1.0,
     """Render `mesh` to a QImage(w,h). yaw/pitch in radians, zoom multiplier.
 
     Solid mode → z-buffered rasterizer (correct occlusion). wire=True → QPainter
-    wireframe. cull=False renders two-sided (default; see module docstring)."""
+    wireframe. cull=False renders two-sided (default; see module docstring);
+    cull=True back-face culls like the game's NCLIP."""
     w, h = max(int(w), 8), max(int(h), 8)
     if not wire:
         from core import raster

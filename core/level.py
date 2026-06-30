@@ -6,7 +6,8 @@ mission N's FDAT entry 2N+1 is a chunk stream [u32 len][payload];
   chunk 0 = the level geometry BLOCKS (PA format, LOCAL coords, PRE-ROTATED on disc)
   chunk 7 = the SECTION PLACEMENT TABLE: 52-byte records, terminated by s16 -1 @ +6:
       +0x00 s16[3] world bbox min   +0x08 s16[3] world bbox max
-      +0x10 s16[3] PLACEMENT TRANSLATION   (world = block_local + translation)
+      +0x10 s16[3] PLACEMENT TRANSLATION   (world = block_local*0.25 + translation;
+                                            blocks are authored 4x — see SCALE)
       +0x1e s16    geometry block index    (blocks are REUSED -> instancing)
       +0x28 u8     lighting-record index
 No per-section rotation is needed. Some missions (e.g. m28 Destroy Gun Emplacement)
@@ -23,6 +24,14 @@ from core import pa_parser as PP
 from core.fdat import mission_entry
 
 HORIZ = 0.7          # |ny| above this = horizontal surface (floor or ceiling)
+
+# Block geometry is authored at 4x the placement scale; the engine renders it
+# through a down-scaling GTE matrix (docs call it the "1/8 scale" numerics; the NET
+# geometry scale is 1/4). CONFIRMED universal: every mission's chunk-7 section bbox
+# is exactly 0.25x its referenced block's bbox, and 2500-unit cell translations only
+# tile without overlap once the 10000-unit blocks are scaled to 2500. Without this,
+# each block floods 4x into its neighbours -> the "redundant interior walls" bug.
+SCALE = 0.25
 
 CLASS_COLORS = {     # face tint per class (textures aren't rendered, so tint by role)
     "floor":   (104, 144, 110),
@@ -96,13 +105,47 @@ def _face_class(verts, face):
     return "wall"
 
 
-def level_mesh(bin_path, n, index_path=None, ceilings=True, tint=True):
+def _canonical(tri_world):
+    """Winding-preserving key for a triangle's 3 (rounded) world vertices.
+
+    The lexicographically-smallest of the 3 cyclic rotations — identical for two
+    faces with the SAME winding at the same place, but different for the reverse
+    winding. Lets us drop same-wound duplicates while keeping a genuine two-sided
+    (opposite-wound) pair, which both modes need."""
+    a, b, c = tri_world
+    return min(((a, b, c), (b, c, a), (c, a, b)))
+
+
+def _dedupe(out):
+    """Drop same-wound coincident duplicate faces in-place.
+
+    Sections instanced edge-to-edge author the SHARED wall/floor face twice at the
+    same place with the same winding (m30: ~2800 such faces). Two coincident faces
+    z-fight under the two-sided z-buffer (the speckled shimmer) and double the
+    apparent wall count; the game never shows both (NCLIP/OT draw one). We keep one
+    per (position, winding) — so the rare genuine zero-thickness two-sided wall
+    (opposite-wound pair, m30: 70) survives intact for the NCLIP view."""
+    seen, kept = set(), []
+    for fc in out.faces:
+        # round on a quarter-unit grid (world coords are multiples of SCALE=0.25)
+        # so distinct faces 0.25 apart aren't falsely merged.
+        tri = tuple(tuple(round(c * 4) for c in out.vertices[i]) for i in fc.verts)
+        key = _canonical(tri)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(fc)
+    out.faces = kept
+    return out
+
+
+def level_mesh(bin_path, n, index_path=None, ceilings=True, tint=True, dedupe=True):
     """
     Mesh of mission N's assembled level (world coords). One group per placed
     section ("s<i>_b<blk>"); faces tinted by class; ceilings dropped if
     ceilings=False. Empty mesh if the mission has no chunk-7 placement table
-    (shared-scene missions).
-    """
+    (shared-scene missions). dedupe=True merges same-wound coincident duplicate
+    faces from instanced-section seams (see _dedupe)."""
     buf = mission_entry(bin_path, n, odd=True, index_path=index_path)
     blocks = _blocks(buf)
     plc = placements(buf, len(blocks))
@@ -118,7 +161,8 @@ def level_mesh(bin_path, n, index_path=None, ceilings=True, tint=True):
             continue
         base = len(out.vertices)
         out.groups.append((f"s{si}_b{blk}", base, len(m.vertices)))
-        out.vertices.extend((v[0]+tx, v[1]+ty, v[2]+tz) for v in m.vertices)
+        out.vertices.extend((v[0]*SCALE+tx, v[1]*SCALE+ty, v[2]*SCALE+tz)
+                            for v in m.vertices)
         for fc in m.faces:
             cls = _face_class(m.vertices, fc.verts)
             if cls == "ceiling" and not ceilings:
@@ -126,7 +170,7 @@ def level_mesh(bin_path, n, index_path=None, ceilings=True, tint=True):
             color = CLASS_COLORS[cls] if tint else fc.color
             out.faces.append(PP.Face(tuple(base + i for i in fc.verts),
                                      color, fc.textured))
-    return out
+    return _dedupe(out) if dedupe else out
 
 
 def level_obj_lines(bin_path, n, index_path=None):
@@ -142,7 +186,7 @@ def level_obj_lines(bin_path, n, index_path=None):
             cache[blk] = PP.parse_block(blocks[blk])
         m = cache[blk]
         base = len(V)
-        V.extend((v[0]+tx, v[1]+ty, v[2]+tz) for v in m.vertices)
+        V.extend((v[0]*SCALE+tx, v[1]*SCALE+ty, v[2]*SCALE+tz) for v in m.vertices)
         for fc in m.faces:
             grouped[_face_class(m.vertices, fc.verts)].append(
                 tuple(base + i for i in fc.verts))

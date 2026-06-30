@@ -115,10 +115,14 @@ def mission_scene(bin_path, n, index_path=None, marker_size=None,
                                meta={"sections": len(lm.groups),
                                      "ceilings": ceilings}))
     sp = spawns(bin_path, n, index_path)
+    # Spawn X,Y,Z live in the same 4x "native" space as the block geometry (the engine
+    # scales both by the GTE matrix); the level mesh is already down-scaled by SCALE,
+    # so scale marker positions to match. (meta['pos'] keeps the raw data values.)
+    from core.level import SCALE
     if marker_size is None and sp:
         xs = [s["x"] for s in sp]; zs = [s["z"] for s in sp]
-        extent = max(max(xs) - min(xs), max(zs) - min(zs), 1000)
-        marker_size = max(extent * 0.018, 300)     # ~2% of world span
+        extent = max(max(xs) - min(xs), max(zs) - min(zs), 1000) * SCALE
+        marker_size = max(extent * 0.018, 120)     # ~2% of world span
     for s in sp:
         meta = {
             "type": s["typ"], "block": s["blk"],
@@ -130,7 +134,7 @@ def mission_scene(bin_path, n, index_path=None, marker_size=None,
             name=f"#{s['i']} type{s['typ']}",
             mesh=_marker_mesh(marker_size),
             rot_y=s["rot"] * 2 * math.pi / 4096,
-            trans=(s["x"], s["y"], s["z"]),
+            trans=(s["x"] * SCALE, s["y"] * SCALE, s["z"] * SCALE),
             color=type_color(s["typ"]),
             meta=meta,
         ))

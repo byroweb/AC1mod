@@ -24,6 +24,21 @@ def smooth_normals(V, F):
     return (VN / n).astype(np.float32)
 
 
+def _flat_arrays(V, F, Fcol, Fid):
+    """Explode to one vertex triple per face, each carrying the face normal — flat
+    (faceted) shading with no cross-face interpolation. Fcol/Fid stay per-face."""
+    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    fn = np.cross(b - a, c - a)
+    nl = np.linalg.norm(fn, axis=1, keepdims=True); nl[nl == 0] = 1.0
+    fn = (fn / nl).astype(np.float32)
+    n = len(F)
+    V2 = np.ascontiguousarray(np.concatenate([a, b, c]), np.float32)
+    VN2 = np.ascontiguousarray(np.concatenate([fn, fn, fn]), np.float32)
+    F2 = np.ascontiguousarray(
+        np.stack([np.arange(n), np.arange(n, 2 * n), np.arange(2 * n, 3 * n)], 1), np.int32)
+    return V2, VN2, F2, np.ascontiguousarray(Fcol, np.uint8), np.ascontiguousarray(Fid, np.int32)
+
+
 def mesh_arrays(mesh):
     """(V, F, Fcol) from a core.pa_parser.Mesh."""
     V = np.array(mesh.vertices, np.float32) if mesh.vertices else np.zeros((0, 3), np.float32)
@@ -58,8 +73,14 @@ class Scene:
     def add(self, obj: SceneObject):
         self.objects.append(obj)
 
-    def to_arrays(self):
-        """Flatten to (V, VN, F, Fcol, Fid) for core.raster.render."""
+    def to_arrays(self, flat=False):
+        """Flatten to (V, VN, F, Fcol, Fid) for core.raster.render.
+
+        flat=True flat-shades (per-face normals), matching AC1's flat polygons and
+        avoiding the cross-face smoothing of smooth_normals — which, on the level's
+        dense coplanar instanced geometry, turns harmless coplanar z-fighting into
+        visible salt-and-pepper. Use it for the level/map view; leave it off for
+        AC/MT models, whose gouraud surfaces want the smooth normals."""
         Vs, Fs, Cs, Ids = [], [], [], []
         base = 0
         for oid, o in enumerate(self.objects):
@@ -81,5 +102,7 @@ class Scene:
         F = np.concatenate(Fs)
         Fcol = np.concatenate(Cs)
         Fid = np.concatenate(Ids)
+        if flat:
+            return _flat_arrays(V, F, Fcol, Fid)
         VN = smooth_normals(V, F)
         return V, VN, F, Fcol, Fid

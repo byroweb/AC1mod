@@ -1915,6 +1915,7 @@ class _RasterCanvas(QWidget):
         self._idbuf = None
         self._idscale = 1.0
         self.yaw, self.pitch, self.zoom = 0.6, 0.5, 0.8
+        self.cull = False          # two-sided by default; MissionView's NCLIP toggle flips it
         self._drag = None
         self._moved = False
         self._lowres = False
@@ -1938,7 +1939,7 @@ class _RasterCanvas(QWidget):
         rw, rh = max(int(w * sc), 8), max(int(h * sc), 8)
         V, VN, F, Fcol, Fid = self._arrays
         img, idb = raster.render(V, VN, F, Fcol, Fid, rw, rh, self.yaw, self.pitch,
-                                 self.zoom, cull=False)
+                                 self.zoom, cull=self.cull)
         self._idbuf, self._idscale = idb, rw / w
         p.drawImage(self.rect(), img)
 
@@ -2023,9 +2024,13 @@ class MissionView(QWidget):
         self._level_cb.setToolTip("show the mission's assembled walkable level")
         self._ceil_cb = QCheckBox("Ceilings"); self._ceil_cb.setChecked(False)
         self._ceil_cb.setToolTip("show ceiling faces (off = see into indoor levels)")
+        self._cull_cb = QCheckBox("Backface cull (NCLIP)"); self._cull_cb.setChecked(False)
+        self._cull_cb.setToolTip("single-side faces exactly like the game's NCLIP "
+                                 "(off = two-sided, walls solid from every orbit angle)")
         self._level_cb.toggled.connect(lambda _: self._load(self._combo.currentIndex()))
         self._ceil_cb.toggled.connect(lambda _: self._load(self._combo.currentIndex()))
-        bar.addWidget(self._level_cb); bar.addWidget(self._ceil_cb)
+        self._cull_cb.toggled.connect(self._on_cull)
+        bar.addWidget(self._level_cb); bar.addWidget(self._ceil_cb); bar.addWidget(self._cull_cb)
         self._info = QLabel(""); self._info.setStyleSheet("color:#8fb0c8; font-size:11px;")
         bar.addWidget(self._info)
         lay.addLayout(bar)
@@ -2040,6 +2045,10 @@ class MissionView(QWidget):
         self._combo.setCurrentIndex(1)
         self._load(1)
 
+    def _on_cull(self, on):
+        self.canvas.cull = bool(on)
+        self.canvas.update()
+
     def _load(self, n):
         from core.mission import mission_scene, TYPE_LABELS
         self.card.hide()
@@ -2051,7 +2060,7 @@ class MissionView(QWidget):
         except Exception as ex:
             self._info.setText(f"load error: {ex}"); return
         self._tlabels = TYPE_LABELS
-        self.canvas.set_arrays(self._scene.to_arrays())
+        self.canvas.set_arrays(self._scene.to_arrays(flat=True))
         kinds = len({s["typ"] for s in self._spawns})
         has_level = any(o.name == "level" for o in self._scene.objects)
         lvl = "" if not self._level_cb.isChecked() else \

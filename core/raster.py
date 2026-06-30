@@ -109,8 +109,9 @@ def render(V, VN, F, Fcol, Fid, w=800, h=600, yaw=0.6, pitch=0.4, zoom=1.0,
            cull=True, center=None, extent=None):
     """Rasterize and return (QImage, id_buffer[h,w] int32).
 
-    cull=True keeps one winding (back-face cull, matching the game's NCLIP); set
-    False to render two-sided (e.g. meshes with inconsistent winding).
+    cull=True keeps one winding (back-face cull) — area>0, the same side the game's
+    level emitter keeps via GTE NCLIP>0 (0x80064628/blez in _ovl202.dis). set
+    False to render two-sided.
     center/extent override the auto fit so the framing can be held stable.
     """
     w, h = int(w), int(h)
@@ -173,7 +174,7 @@ def _render_numpy(sx, sy, depth, inten, F, Fcol, Fid, w, h, bg, cull):
     rby0 = np.minimum(np.minimum(y0, y1), y2); rby1 = np.maximum(np.maximum(y0, y1), y2)
     vis = area != 0
     if cull:
-        vis &= area < 0
+        vis &= area > 0          # keep area>0 = the game's NCLIP>0 (back-face cull)
     vis &= (rbx1 >= 0) & (rbx0 <= w - 1) & (rby1 >= 0) & (rby0 <= h - 1)
     bx0 = np.clip(np.floor(rbx0), 0, w - 1).astype(np.int64)
     bx1 = np.clip(np.ceil(rbx1), 0, w - 1).astype(np.int64)

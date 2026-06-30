@@ -20,7 +20,7 @@
  *   F              : Nf*3 vertex indices (int)
  *   Fcol           : Nf*3 base RGB (uint8)
  *   Fid            : Nf object ids (int, for picking)
- *   cull           : 1 = keep one winding (area<0), 0 = two-sided
+ *   cull           : 1 = keep one winding (area>0 = the game's NCLIP>0), 0 = two-sided
  *   img            : h*w*3 uint8 out
  *   idbuf          : h*w int out
  *   zbuf           : h*w float scratch (nearest depth per pixel)
@@ -40,7 +40,7 @@ void rasterize(int w, int h,
 
         const float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
         if (area == 0.0f) continue;
-        if (cull && area >= 0.0f) continue;           /* back-face */
+        if (cull && area <= 0.0f) continue;           /* back-face (game keeps NCLIP>0) */
         const float inv = 1.0f / area;
 
         /* clipped integer bbox */
