@@ -1,0 +1,39 @@
+# shadowraven — mod manifest
+# Codename; rename freely. One mod = one folder under mods/.
+
+[mod]
+name        = "shadowraven"
+version     = "0.0.1"
+description = "Stealth-infiltration overhaul for Armored Core 1."
+authors     = ["byroweb"]
+license     = "MIT"
+
+[target]
+# The exact game build this mod patches. Addresses only match this revision.
+game     = "Armored Core"
+serial   = "SLUS-01323"
+revision = "v1.1"
+
+[engine]
+# AC1_RE provides the extraction/patch/repack toolchain and the RE this mod relies on.
+# Pinned as a git submodule for reproducible builds. Repoint to a tagged AC1_RE
+# "foundation" release once one is cut.
+repo       = "https://github.com/byroweb/ac1_re"
+submodule  = "ac1_re"
+pinned_rev = "0b712ff"   # informational; the submodule gitlink is the source of truth
+
+# Components the build assembles (all authored against AC1_RE tooling/RE).
+[components]
+missions = "missions/"   # chunk-4 scripts via ac1_re/tools/mission/mission_script.py
+assets   = "assets/"     # replacement TIM / PA / audio (recipes, not game bytes)
+patches  = "patch/"      # C/MIPS for the in-mission overlay (FDAT 202 @ 0x80050000)
+
+# Design systems this mod introduces, gated on the RE de-risk in AC1_RE.
+# Status: planned | blocked-on-re | in-progress | done
+[systems]
+perception_gate   = "blocked-on-re"  # Goal 0 (keystone): LOS/FOV/range detection
+scripted_strike   = "blocked-on-re"  # Goal A: airstrike / mech-breach area damage
+on_foot_dismount  = "blocked-on-re"  # Goal B: player-control reassignment
+sentry_mode       = "planned"        # +0x58 think-handler swap on parked mech
+modular_sensors   = "planned"        # optional-slot parts override perception params
+destructibility   = "planned"        # breachable shell vs. indestructible interior

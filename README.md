@@ -1,45 +1,70 @@
-# AC1mod
+# AC1mod — Stealth-Infiltration Mod for Armored Core (SLUS-01323)
 
-A desktop tool for browsing, previewing, annotating and modding the assets of the
-PlayStation game **Armored Core** (1997, `SLUS-01323`). Evolved from **PSXmod**
-(a general PSX BIN asset browser) into an AC1-specific toolkit, built on
-[jPSXdec](https://github.com/m35/jpsxdec).
+> **Codename: `shadowraven`.** A stealth/infiltration overhaul for the PlayStation
+> game *Armored Core* (1997, North American `SLUS-01323` v1.1): perception-gated
+> enemies, dismount-and-infiltrate on foot, modular sensors, sentry-mode mechs, and
+> alert-driven reinforcements/airstrikes.
 
-> **No game data is included or distributed.** You must supply your own legally
-> obtained disc image. The tool reads assets from *your* copy, on *your* machine;
-> the repository ships only source code.
+> **This repository previously hosted the AC1mod viewer/CLI tool.** That tooling now
+> lives in the **[AC1_RE](https://github.com/byroweb/ac1_re)** repo (under `ac1mod/`),
+> alongside the reverse-engineering notes it's interdependent with. The standalone
+> viewer history is preserved in this repo's `main` at commit `616bcd2` and in AC1_RE.
+> This repo is now **the mod**.
 
-## Features
-- Browse the disc's file index (via jPSXdec); preview **TIM** images, **text**, and
-  raw **hex** per entry; import replacement images/audio.
-- **PA##.T 3D model viewer** — the stage/object geometry packs decode into an
-  orbitable, software-rendered mesh (drag = orbit, wheel = zoom). Each PA file is a
-  container of many low-poly objects (stage pieces, MTs, ACs, props).
-- **Per-PA notes** saved in the `.ac1mod` project file — annotate what each PA file
-  contains.
-- **Headless CLI** (`ac1mod_cli.py`) — `list / info / note / obj / render`: browse,
-  annotate, export OBJ, and render PNG previews without the GUI.
+## No game data
 
-## Run
+Ships **only** original mod source — mission scripts, binary patches, and asset
+*recipes*. **No game executable, assets, or disc data** are included or distributed.
+You supply your own legally obtained copy of `SLUS-01323`; the build operates on data
+*you* extract from it, on your machine.
+
+## How it's built
+
+The mod is produced as a **patch** applied to your own disc image, using the AC1_RE
+toolchain (extraction, the mission-script assembler, `.T` repack, reinject). AC1_RE is
+pinned here as a git submodule so builds are reproducible against a known engine RE.
+
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-./run_ac1mod.sh            # or: .venv/bin/python main.py
-```
-CLI examples:
-```sh
-.venv/bin/python ac1mod_cli.py list
-.venv/bin/python ac1mod_cli.py render GG/P0/PA00.T -o /tmp/pa00.png
-.venv/bin/python ac1mod_cli.py note set GG/P0/PA00.T "PA00 = ..."
+git clone --recurse-submodules https://github.com/byroweb/AC1mod.git
+# or, after a plain clone:
+git submodule update --init --recursive
 ```
 
-## How the PA geometry was reverse-engineered
-The PA##.T container + custom (non-TMD) primitive format were reverse-engineered
-separately; see the companion notes in the `AC_1_USA_RE` project
-(`docs/PA_FORMAT.md`). `core/pa_parser.py` vendors that validated decoder.
+Then (once the build is implemented — see Status):
+
+```sh
+python build.py --bin /path/to/your/SLUS-01323.bin --mod mods/shadowraven
+```
+
+## Layout
+
+```
+mods/shadowraven/      # the mod
+  mod.toml             #   metadata: version, target game, engine pin, systems
+  missions/            #   authored chunk-4 mission scripts (via ac1_re mission_script.py)
+  assets/              #   replacement TIM / PA geometry / audio
+  patch/               #   C / MIPS patches for the in-mission overlay (FDAT 202)
+build.py               # extract -> patch -> repack -> reinject pipeline (stub)
+ac1_re/                # AC1_RE toolchain + RE notes, pinned submodule
+docs/                  # design + the RE backlog this mod depends on
+```
+
+## Status
+
+**Pre-implementation.** The mod's feasibility hinges on a short reverse-engineering
+de-risk tracked in AC1_RE — in priority order:
+
+0. **Perception gate** (make enemy detection respect line of sight) — *the keystone*.
+1. **Scripted area damage** (airstrike / mech-breach defenses).
+2. **Player-control reassignment** (on-foot dismount).
+
+See [`docs/`](docs/) for the design and the full backlog. Authoring of missions/assets
+begins once Goal 0 is confirmed feasible.
 
 ## Legal
-Unofficial, non-commercial fan tooling for interoperability and preservation. Not
-affiliated with or endorsed by FromSoftware or Agetec. *Armored Core* and all
-related assets are property of their respective owners. This repository contains
-**only original source code** — no game executable, ROM, disc image, textures, or
-audio.
+
+Unofficial, non-commercial fan modification for interoperability, preservation, and
+education. Not affiliated with or endorsed by FromSoftware or Agetec. *Armored Core*
+and all related assets are the property of their respective owners. Original mod source
+is released under the [MIT License](LICENSE); that license covers this repository's own
+work only and grants no rights in the underlying game.
